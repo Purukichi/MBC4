@@ -1,0 +1,64 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (universal arm64 + x86_64, JUCE fetched)
+        run: cmake -S . -B build -G Xcode
+
+      - name: Build VST3 / AU / Standalone
+        run: cmake --build build --config Release --parallel
+
+      - name: Offline tests
+        run: |
+          cmake --build build --config Release --target MBC4_Tests
+          ./build/Release/MBC4_Tests
+
+      - name: Ad-hoc sign and package
+        run: |
+          ART=build/MBC4_artefacts/Release
+          codesign --force --deep --sign - "$ART/VST3/MBC4.vst3" "$ART/AU/MBC4.component" "$ART/Standalone/MBC4.app"
+          mkdir -p dist
+          ditto -c -k --keepParent "$ART/VST3/MBC4.vst3"      dist/MBC4-mac-VST3.zip
+          ditto -c -k --keepParent "$ART/AU/MBC4.component"   dist/MBC4-mac-AU.zip
+          ditto -c -k --keepParent "$ART/Standalone/MBC4.app" dist/MBC4-mac-Standalone.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MBC4-macOS
+          path: dist/*.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (JUCE fetched)
+        run: cmake -S . -B build -A x64
+
+      - name: Build VST3 / Standalone
+        run: cmake --build build --config Release --parallel
+
+      - name: Offline tests
+        run: |
+          cmake --build build --config Release --target MBC4_Tests
+          ./build/Release/MBC4_Tests.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path build/MBC4_artefacts/Release/VST3/MBC4.vst3 -DestinationPath dist/MBC4-win-VST3.zip
+          Compress-Archive -Path build/MBC4_artefacts/Release/Standalone/MBC4.exe -DestinationPath dist/MBC4-win-Standalone.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MBC4-Windows
+          path: dist/*.zip
