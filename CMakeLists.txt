@@ -6,7 +6,7 @@ if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build architectures")
 endif()
 
-project(MBC4 VERSION 0.0.14 LANGUAGES C CXX)
+project(MBC4 VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,7 +30,7 @@ if(APPLE)
 endif()
 
 juce_add_plugin(MBC4
-    VERSION                  0.0.14
+    VERSION                  1.0.0
     COMPANY_NAME             "ongakuushi"
     BUNDLE_ID                com.ongakuushi.mbc4
     PLUGIN_MANUFACTURER_CODE Ongk

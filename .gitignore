@@ -3,3 +3,4 @@ build-mac/
 libs/
 .vs/
 
+dist/
