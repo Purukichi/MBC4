@@ -10,9 +10,10 @@ namespace
         return juce::jmap (db, Grid::maxDb, Grid::minDb, (float) Grid::plotT, (float) Grid::plotB);
     }
 
-    int rowsFor (float db)
+    int rowsFor (float db, int rows)
     {
-        return juce::jlimit (0, Grid::plotRows, (int) std::floor ((db - Grid::minDb) / Grid::dbPerRow + 1.0e-4f));
+        const float perRow = (Grid::maxDb - Grid::minDb) / (float) rows;
+        return juce::jlimit (0, rows, (int) std::floor ((db - Grid::minDb) / perRow + 1.0e-4f));
     }
 }
 
@@ -89,19 +90,20 @@ void MainView::resized()
 //==============================================================================
 void MainView::paintMeter (juce::Graphics& g, const Draw::Px& px, float cx, const Meter& m)
 {
-    // two columns of dots on the graph's rows; above 0 dB in orange
-    const int n = rowsFor (m.shown), ref = rowsFor (0.0f);
+    // two columns of dots on the graph's rows (same lattice); above 0 dB in orange
+    const Draw::Lattice lat (px, cx - 3.5f, (float) Grid::plotT, Grid::pitch, Grid::cell);
+    const int rows = lat.fit ((float) (Grid::plotB - Grid::plotT));
+    const int n = rowsFor (m.shown, rows), ref = rowsFor (0.0f, rows);
     juce::RectangleList<float> off, over;
     std::array<juce::RectangleList<float>, Palette::ramp.size()> ramp;
 
-    for (int j = 0; j < Grid::plotRows; ++j)
+    for (int j = 0; j < rows; ++j)
     {
-        const float y = (float) Grid::plotT + Grid::pitch * (float) (Grid::plotRows - 1 - j);
         const int ri = juce::jlimit (0, (int) Palette::ramp.size() - 1,
-                                     (int) ((float) j / (float) Grid::plotRows * (float) Palette::ramp.size() * 1.15f));
+                                     (int) ((float) j / (float) rows * (float) Palette::ramp.size() * 1.15f));
         auto& list = j >= n ? off : j >= ref ? over : ramp[(size_t) ri];
-        list.addWithoutMerging (px.cell (cx - 3.5f, y));
-        list.addWithoutMerging (px.cell (cx + 0.5f, y));
+        list.addWithoutMerging (lat.at (0, rows - 1 - j));
+        list.addWithoutMerging (lat.at (1, rows - 1 - j));
     }
 
     g.setColour (Palette::off);
@@ -115,7 +117,7 @@ void MainView::paintMeter (juce::Graphics& g, const Draw::Px& px, float cx, cons
     g.fillRectList (over);
 
     // 0 dB reference: exactly as wide as the dots
-    Draw::lineH (g, px, cx - 3.5f, cx + 3.5f, meterY (0.0f), Palette::ink);
+    Draw::lineH (g, px, lat.x (0), lat.x (0) + lat.extent (2), meterY (0.0f), Palette::ink);
 
     const auto readout = m.hold <= Grid::minDb ? juce::String ("--.-")
                                                : (m.hold > 0.0f ? "+" : "") + juce::String (m.hold, 1);

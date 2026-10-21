@@ -55,10 +55,31 @@ namespace Draw
         float snapX (float x) const noexcept { return std::round ((x + ox) * k) / k - ox; }
         float snapY (float y) const noexcept { return std::round ((y + oy) * k) / k - oy; }
         juce::Rectangle<float> rect (float x, float y, float w, float h) const noexcept;
-        juce::Rectangle<float> cell (float x, float y) const noexcept;
         float dev (float t) const noexcept { return juce::jmax (1.0f, std::round (t * k)) / k; }   // >= 1 device px
 
         float k = 1.0f, ox = 0.0f, oy = 0.0f;
+    };
+
+    /** Cells on a whole-device-pixel pitch, so every cell and every gap has the same size
+        at any UI scale. The pitch / cell size given in base units are rounded once; the
+        cell count that fits a length can therefore differ slightly from scale to scale. */
+    struct Lattice
+    {
+        Lattice (const Px&, float x, float y, float pitch, float cellSize);
+
+        /** cells [i, i+ni) x [j, j+nj), including the gaps between them (base units) */
+        juce::Rectangle<float> span (int i, int j, int ni = 1, int nj = 1) const noexcept;
+        juce::Rectangle<float> at (int i, int j) const noexcept { return span (i, j); }
+
+        float x (int i) const noexcept { return ((float) (dx0 + i * P)) / k - ox; }   // left edge of column i
+        float y (int j) const noexcept { return ((float) (dy0 + j * P)) / k - oy; }   // top edge of row j
+        float cellSize() const noexcept { return (float) C / k; }
+        float gapSize() const noexcept  { return (float) gap / k; }
+        float extent (int n) const noexcept { return (float) (n * P - gap) / k; }      // length of n cells
+        int   fit (float length) const noexcept;                                     // cells that fit a length
+
+        float k, ox, oy;
+        int P, C, gap, dx0, dy0;
     };
 
     /** y is the text's centre line */
@@ -81,8 +102,6 @@ namespace Draw
     void dotNumber (juce::Graphics&, const Px&, const juce::String&, float cx, float top, juce::Colour);
     /** 4 x 5 dot logo, the last letter in the accent */
     void logo (juce::Graphics&, const Px&, float x, float y);
-    /** n x m cells on the 4 px pitch, one colour */
-    void cells (juce::Graphics&, const Px&, float x, float y, int cols, int rows, juce::Colour);
 }
 
 //==============================================================================

@@ -12,9 +12,10 @@ namespace
         return f >= 1000.0f ? juce::String (f / 1000.0f, f >= 10000.0f ? 1 : 2) + "kHz" : juce::String (juce::roundToInt (f)) + " Hz";
     }
 
-    int rowsFor (float db)
+    int rowsFor (float db, int rows)
     {
-        return juce::jlimit (0, Grid::plotRows, (int) std::floor ((db - Grid::minDb) / Grid::dbPerRow + 1.0e-4f));
+        const float perRow = (Grid::maxDb - Grid::minDb) / (float) rows;
+        return juce::jlimit (0, rows, (int) std::floor ((db - Grid::minDb) / perRow + 1.0e-4f));
     }
 
     float roundSignificant (float f, int digits)
@@ -250,24 +251,40 @@ void GraphView::paintCells (juce::Graphics& g)
     const bool showOut = mode == AnalyzerMode::both || mode == AnalyzerMode::post;
     const bool showIn  = mode != AnalyzerMode::off;
 
+    // whole-pixel lattice: how many cells fit depends a little on the UI scale
+    const Draw::Lattice lat (px, plot.getX(), plot.getY(), Grid::pitch, Grid::cell);
+    const int cols = lat.fit (plot.getWidth()), rows = lat.fit (plot.getHeight());
+
+    // the analyser runs on numCols fixed frequencies: read it at each cell column's frequency
+    auto sample = [] (const Spectrum& s, float idx)
+    {
+        const float i = juce::jlimit (0.0f, (float) (numCols - 1), idx);
+        const int i0 = (int) i, i1 = juce::jmin (numCols - 1, i0 + 1);
+        return s.display[(size_t) i0] + (i - (float) i0) * (s.display[(size_t) i1] - s.display[(size_t) i0]);
+    };
+
     // one rectangle list per colour; runs of cells are filled as single rectangles
-    // and the 1 px gaps between cells are drawn over them afterwards
+    // and the gaps between cells are drawn over them afterwards
     constexpr int numColours = (int) Palette::ramp.size() + 3;   // ramp, accent, ghost, off
     std::array<juce::RectangleList<float>, numColours> lists;
     const int accentIdx = (int) Palette::ramp.size(), ghostIdx = accentIdx + 1, offIdx = accentIdx + 2;
 
-    auto rampIndex = [] (int j) { return juce::jlimit (0, (int) Palette::ramp.size() - 1,
-                                                       (int) ((float) j / (float) numRows * (float) Palette::ramp.size() * 1.15f)); };
+    auto rampIndex = [rows] (int j) { return juce::jlimit (0, (int) Palette::ramp.size() - 1,
+                                                           (int) ((float) j / (float) rows * (float) Palette::ramp.size() * 1.15f)); };
 
-    for (int c = 0; c < numCols; ++c)
+    for (int c = 0; c < cols; ++c)
     {
-        const int b = bandAt (freqToX (colHz[(size_t) c]));
-        const float inDb = pre.display[(size_t) c];
+        const float cx = lat.x (c) + lat.cellSize() * 0.5f;
+        const float f  = xToFreq (cx);
+        const float idx = std::log (f / minHz) / std::log (maxHz / minHz) * (float) numCols - 0.5f;
+
+        const int b = bandAt (cx);
+        const float inDb = sample (pre, idx);
         const float gr = bypassP[b]->getValue() > 0.5f ? 0.0f : grDisp[(size_t) b];
 
-        const int nIn  = showIn  ? rowsFor (inDb) : 0;
-        const int nOut = showOut ? rowsFor (post.display[(size_t) c]) : 0;
-        const int nCut = rowsFor (inDb + gr);
+        const int nIn  = showIn  ? rowsFor (inDb, rows) : 0;
+        const int nOut = showOut ? rowsFor (sample (post, idx), rows) : 0;
+        const int nCut = rowsFor (inDb + gr, rows);
 
         auto colourOf = [&] (int j)
         {
@@ -279,17 +296,15 @@ void GraphView::paintCells (juce::Graphics& g)
             return offIdx;
         };
 
-        const float x = plot.getX() + Grid::pitch * (float) c;
         int runStart = 0, runColour = colourOf (0);
-        for (int j = 1; j <= numRows; ++j)
+        for (int j = 1; j <= rows; ++j)
         {
-            const int col = j < numRows ? colourOf (j) : -1;
+            const int col = j < rows ? colourOf (j) : -1;
             if (col == runColour)
                 continue;
 
             // rows [runStart, j) counted from the bottom
-            const float top = plot.getY() + Grid::pitch * (float) (numRows - j);
-            lists[(size_t) runColour].addWithoutMerging (px.rect (x, top, Grid::cell, Grid::pitch * (float) (j - runStart)));
+            lists[(size_t) runColour].addWithoutMerging (lat.span (c, rows - j, 1, j - runStart));
             runStart = j;
             runColour = col;
         }
@@ -304,20 +319,13 @@ void GraphView::paintCells (juce::Graphics& g)
     }
     g.setColour (Palette::accent); g.fillRectList (lists[(size_t) accentIdx]);
 
-    // gaps between cells, in the background colour
+    // gaps between the cells of a run, in the background colour
     juce::RectangleList<float> gaps;
-    for (int c = 0; c < numCols; ++c)
-    {
-        const float x = plot.getX() + Grid::pitch * (float) c + Grid::cell;
-        const float x0 = px.snapX (x);
-        gaps.addWithoutMerging ({ x0, plot.getY(), px.snapX (x + 1.0f) - x0, plot.getHeight() });
-    }
-    for (int r = 0; r < numRows; ++r)
-    {
-        const float y = plot.getY() + Grid::pitch * (float) r + Grid::cell;
-        const float y0 = px.snapY (y);
-        gaps.addWithoutMerging ({ plot.getX(), y0, plot.getWidth(), px.snapY (y + 1.0f) - y0 });
-    }
+    const float top = lat.y (0), height = lat.extent (rows), left = lat.x (0), width = lat.extent (cols);
+    for (int r = 0; r + 1 < rows; ++r)
+        gaps.addWithoutMerging ({ left, lat.y (r) + lat.cellSize(), width, lat.gapSize() });
+    for (int c = 0; c + 1 < cols; ++c)
+        gaps.addWithoutMerging ({ lat.x (c) + lat.cellSize(), top, lat.gapSize(), height });
     g.setColour (Palette::cell);
     g.fillRectList (gaps);
 }

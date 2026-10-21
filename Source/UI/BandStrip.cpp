@@ -267,13 +267,13 @@ void BandStrip::paint (juce::Graphics& g)
     // gain reduction: orange cells hanging from the top
     const float cx = (float) Grid::grX;
     const int lit = juce::roundToInt (juce::jlimit (0.0f, 1.0f, grShown / meterRange) * (float) Grid::faderRows);
+    const Draw::Lattice lat (px, cx - 3.5f, grCellsY, Grid::pitch, Grid::cell);
     juce::RectangleList<float> on, off;
     for (int j = 0; j < Grid::faderRows; ++j)
     {
         auto& list = j < lit ? on : off;
-        const float y = grCellsY + Grid::pitch * (float) j;
-        list.addWithoutMerging (px.cell (cx - 3.5f, y));
-        list.addWithoutMerging (px.cell (cx + 0.5f, y));
+        list.addWithoutMerging (lat.at (0, j));
+        list.addWithoutMerging (lat.at (1, j));
     }
     g.setColour (Palette::off);  g.fillRectList (off);
     g.setColour (dim ? Palette::dLit : Palette::accent); g.fillRectList (on);

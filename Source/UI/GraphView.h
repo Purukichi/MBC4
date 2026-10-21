@@ -43,7 +43,7 @@ private:
     static constexpr int fftOrder = 11;
     static constexpr int fftSize  = 1 << fftOrder;
     static constexpr float minHz = 20.0f, maxHz = 20000.0f;
-    static constexpr int numCols = 225, numRows = 65;
+    static constexpr int numCols = 225;   // analyser points (the drawn cell count follows the UI scale)
 
     struct Spectrum
     {

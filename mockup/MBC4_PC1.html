@@ -33,7 +33,7 @@ const LABEL = { size: 8, w: 400, ls: 0.8 }, VAL = { size: 9, w: 300, ls: 0 },
 // ───────────────────────────────── layout (10 px grid)
 const COL_L = 140, COL_R = 1100, ROW_B = 380, FRAME_B = 760;
 const PX0 = 150, PX1 = 1050, PY0 = 80, PY1 = 340;          // plot: 225 × 65 cells
-const NC = 225, NR = 65, DBT = 6, DBB = -72, DB_ROW = (DBT - DBB) / NR;
+const NC = 225, DBT = 6, DBB = -72;                       // simulated columns, dB range
 const FAD_Y = 440, FAD_ROWS = 40;                           // vertical faders: 440 – 600
 const SL_X = 46, SL_CELLS = 32;                             // horizontal sliders, from band x0
 
@@ -54,9 +54,17 @@ function R(x, y, w, h, c) {
   ctx.fillStyle = c;
   ctx.fillRect(x0, y0, Math.max(1, Math.round((x + w) * k) - x0), Math.max(1, Math.round((y + h) * k) - y0));
 }
-function cellTo(p, x, y, w = 3, h = 3) {
-  const x0 = Math.round(x * k), y0 = Math.round(y * k);
-  p.rect(x0, y0, Math.max(1, Math.round((x + w) * k) - x0), Math.max(1, Math.round((y + h) * k) - y0));
+// cells on a whole-device-pixel pitch: every cell and gap has one size at any zoom
+function Lat(x, y, pitch = 4, cell = 3) {
+  const gap = Math.max(1, Math.round((pitch - cell) * k));
+  const P = Math.max(gap + 1, Math.round(pitch * k));
+  const L = { P, gap, C: P - gap, x0: Math.round(x * k), y0: Math.round(y * k) };
+  L.fit = len => Math.max(1, Math.floor((Math.round(len * k) + gap) / P));
+  L.add = (p, i, j, ni = 1, nj = 1) => p.rect(L.x0 + i * P, L.y0 + j * P, ni * P - gap, nj * P - gap);
+  L.cx = i => (L.x0 + i * P + L.C / 2) / k;     // cell centre, base units
+  L.cy = j => (L.y0 + j * P + L.C / 2) / k;
+  L.ext = n => (n * P - gap) / k;
+  return L;
 }
 // rules: 0.2 px
 function ruleH(x1, x2, y) { ctx.fillStyle = C.rule; ctx.fillRect(x1 * k, (y - 0.1) * k, (x2 - x1) * k, 0.2 * k); }
@@ -112,15 +120,14 @@ const DIG = {
   '.': ['0','0','0','0','0','0','1'],
 };
 function dotNum(str, cx, top, color) {
-  const P = 2, D = 1.6;
-  const adv = ch => DIG[ch][0].length * P + P;
-  let w = -P; for (const ch of str) w += adv(ch);
-  let x = cx - w / 2;
+  let cols = -1; for (const ch of str) cols += DIG[ch][0].length + 1;
+  const L = Lat(cx - Lat(0, 0, 2, 1.6).ext(cols) / 2, top, 2, 1.6);
   const on = new Path2D(), off = new Path2D();
+  let c0 = 0;
   for (const ch of str) {
     const g = DIG[ch];
-    g.forEach((row, r) => [...row].forEach((b, c) => cellTo(b === '1' ? on : off, x + c * P, top + r * P, D, D)));
-    x += adv(ch);
+    g.forEach((row, r) => [...row].forEach((b, c) => L.add(b === '1' ? on : off, c0 + c, r)));
+    c0 += g[0].length + 1;
   }
   ctx.fillStyle = C.off; ctx.fill(off);
   ctx.fillStyle = color; ctx.fill(on);
@@ -236,7 +243,7 @@ const fx = f => PX0 + (PX1 - PX0) * Math.log(f / 20) / Math.log(1000);
 const xf = x => 20 * Math.pow(1000, (x - PX0) / (PX1 - PX0));
 const dy = d => PY1 - (d - DBB) / (DBT - DBB) * (PY1 - PY0);
 const yd = y => DBB + (PY1 - y) / (PY1 - PY0) * (DBT - DBB);
-const rowsFor = d => clamp(Math.floor((d - DBB) / DB_ROW + 1e-6), 0, NR);
+const rowsFor = (d, rows) => clamp(Math.floor((d - DBB) / ((DBT - DBB) / rows) + 1e-6), 0, rows);
 const bandOf = f => f < xo[0] ? 0 : f < xo[1] ? 1 : f < xo[2] ? 2 : 3;
 function bandSpan(i) { return [i === 0 ? PX0 : fx(xo[i - 1]), i === 3 ? PX1 : fx(xo[i])]; }
 
@@ -321,16 +328,19 @@ function drawGraph() {
   const paths = new Map();
   const P = col => { let p = paths.get(col); if (!p) { p = new Path2D(); paths.set(col, p); } return p; };
   const showOut = G.mode <= 1, showIn = G.mode === 0 || G.mode === 2;
-  for (let c = 0; c < NC; ++c) {
-    const x = PX0 + c * 4;
-    const nIn = G.mode === 3 ? 0 : rowsFor(inDb[c]), nOut = showOut ? rowsFor(outDb[c]) : 0, nCut = rowsFor(cutDb[c]);
-    for (let j = 0; j < NR; ++j) {
+  // how many cells fit depends a little on the zoom; the simulation runs on NC fixed columns
+  const L = Lat(PX0, PY0), cols = L.fit(PX1 - PX0), rows = L.fit(PY1 - PY0);
+  const at = (arr, i) => { i = clamp(i, 0, NC - 1); const i0 = Math.floor(i), i1 = Math.min(NC - 1, i0 + 1); return arr[i0] + (i - i0) * (arr[i1] - arr[i0]); };
+  for (let c = 0; c < cols; ++c) {
+    const idx = Math.log(xf(L.cx(c)) / 20) / Math.log(1000) * NC - 0.5;
+    const nIn = G.mode === 3 ? 0 : rowsFor(at(inDb, idx), rows), nOut = showOut ? rowsFor(at(outDb, idx), rows) : 0, nCut = rowsFor(at(cutDb, idx), rows);
+    for (let j = 0; j < rows; ++j) {
       let col = C.off;
-      const ramp = RAMP[Math.min(RAMP.length - 1, Math.floor(j / NR * RAMP.length * 1.15))];
+      const ramp = RAMP[Math.min(RAMP.length - 1, Math.floor(j / rows * RAMP.length * 1.15))];
       if (j < nOut) col = ramp;
       else if (showOut && j >= nCut && j < nIn) col = C.acc;
       else if (j < nIn && showIn) col = G.mode === 2 ? ramp : C.ghost;
-      cellTo(P(col), x, PY0 + 4 * (NR - 1 - j));
+      L.add(P(col), c, rows - 1 - j);
     }
   }
   for (const [col, p] of paths) { ctx.fillStyle = col; ctx.fill(p); }
@@ -351,21 +361,21 @@ function drawGraph() {
 }
 
 function drawMeter(cx, lv, pk) {
-  const p0 = new Path2D(), pa = new Path2D(), rows = RAMP.map(() => new Path2D());
-  const ref = rowsFor(0);
+  // same lattice rows as the graph
+  const L = Lat(cx - 3.5, PY0), rows = L.fit(PY1 - PY0);
+  const p0 = new Path2D(), pa = new Path2D(), ramp = RAMP.map(() => new Path2D());
+  const ref = rowsFor(0, rows);
   lv.forEach((v, ch) => {
-    const x = cx - 3.5 + ch * 4, n = rowsFor(v);
-    for (let j = 0; j < NR; ++j) {
-      const y = PY0 + 4 * (NR - 1 - j);
-      if (j >= n) cellTo(p0, x, y);
-      else if (j >= ref) cellTo(pa, x, y);
-      else cellTo(rows[Math.min(RAMP.length - 1, Math.floor(j / NR * RAMP.length * 1.15))], x, y);
+    const n = rowsFor(v, rows);
+    for (let j = 0; j < rows; ++j) {
+      const p = j >= n ? p0 : j >= ref ? pa : ramp[Math.min(RAMP.length - 1, Math.floor(j / rows * RAMP.length * 1.15))];
+      L.add(p, ch, rows - 1 - j);
     }
   });
   ctx.fillStyle = C.off; ctx.fill(p0);
-  rows.forEach((p, i) => { ctx.fillStyle = RAMP[i]; ctx.fill(p); });
+  ramp.forEach((p, i) => { ctx.fillStyle = RAMP[i]; ctx.fill(p); });
   ctx.fillStyle = C.acc; ctx.fill(pa);
-  lineH(cx - 3.5, cx + 3.5, dy(0), C.ink);
+  lineH(L.x0 / k, L.x0 / k + L.ext(2), dy(0), C.ink);
   const v = Math.max(pk, -72);
   dotNum((v > 0 ? '+' : '') + v.toFixed(1), cx, 352, pk > 0 ? C.acc : C.ink);
 }
@@ -375,15 +385,16 @@ function drawV(ct) {
   const r = Math.round(sp.m.n(v) * (FAD_ROWS - 1));
   const b0 = sp.bip != null ? Math.round(sp.m.n(sp.bip) * (FAD_ROWS - 1)) : 0;
   const lo = Math.min(b0, r), hi = Math.max(b0, r);
+  const L = Lat(cx - 3.5, FAD_Y);
   const pOff = new Path2D(), pLit = new Path2D(), pKnob = new Path2D();
   for (let j = 0; j < FAD_ROWS; ++j) {
-    const y = FAD_Y + 4 * (FAD_ROWS - 1 - j), p = j === r ? pKnob : (j >= lo && j <= hi ? pLit : pOff);
-    cellTo(p, cx - 3.5, y); cellTo(p, cx + 0.5, y);
+    const p = j === r ? pKnob : (j >= lo && j <= hi ? pLit : pOff);
+    L.add(p, 0, FAD_ROWS - 1 - j); L.add(p, 1, FAD_ROWS - 1 - j);
   }
   ctx.fillStyle = C.off; ctx.fill(pOff);
   ctx.fillStyle = dis ? C.dLit : C.lit; ctx.fill(pLit);
   ctx.fillStyle = dis ? C.dKnob : C.ink; ctx.fill(pKnob);
-  lineH(cx - 9, cx + 9, FAD_Y + 4 * (FAD_ROWS - 1 - r) + 1.5, dis ? C.dKnob : C.ink, isDrag(ct) ? 1 : 0.5);
+  lineH(cx - 9, cx + 9, L.cy(FAD_ROWS - 1 - r), dis ? C.dKnob : C.ink, isDrag(ct) ? 1 : 0.5);
   T(ct.label, cx, 425, LABEL, dis ? C.dText : C.ink, 'center');
   T(sp.f(v), cx, 612, VAL, dis ? C.dText : C.ink, 'center');
 }
@@ -391,12 +402,13 @@ function drawV(ct) {
 function drawH(ct) {
   const { x0, yc, sp } = ct, v = ct.obj[ct.key], dis = ct.dis && ct.dis();
   const r = Math.round(sp.m.n(v) * (SL_CELLS - 1));
+  const L = Lat(x0 + SL_X, yc - 1.5);
   const pOff = new Path2D(), pLit = new Path2D(), pKnob = new Path2D();
-  for (let j = 0; j < SL_CELLS; ++j) cellTo(j === r ? pKnob : j < r ? pLit : pOff, x0 + SL_X + 4 * j, yc - 1.5);
+  for (let j = 0; j < SL_CELLS; ++j) L.add(j === r ? pKnob : j < r ? pLit : pOff, j, 0);
   ctx.fillStyle = C.off; ctx.fill(pOff);
   ctx.fillStyle = dis ? C.dLit : C.lit; ctx.fill(pLit);
   ctx.fillStyle = dis ? C.dKnob : C.ink; ctx.fill(pKnob);
-  lineV(x0 + SL_X + 4 * r + 1.5, yc - 5, yc + 5, dis ? C.dKnob : C.ink, isDrag(ct) ? 1 : 0.5);
+  lineV(L.cx(r), yc - 5, yc + 5, dis ? C.dKnob : C.ink, isDrag(ct) ? 1 : 0.5);
   T(ct.label, x0 + 10, yc, LABEL, dis ? C.dText : C.ink);
   T(sp.f(v), x0 + 230, yc, VAL, dis ? C.dText : C.ink, 'right');
 }
@@ -409,8 +421,9 @@ function drawBand(i) {
 
   // gain reduction: dots hang from the top, 0 – 24 dB
   const cx = x0 + 210, n = Math.round(clamp(b.gr / 24, 0, 1) * FAD_ROWS);
+  const L = Lat(cx - 3.5, FAD_Y);
   const pOff = new Path2D(), pOn = new Path2D();
-  for (let j = 0; j < FAD_ROWS; ++j) { const p = j < n ? pOn : pOff; cellTo(p, cx - 3.5, FAD_Y + 4 * j); cellTo(p, cx + 0.5, FAD_Y + 4 * j); }
+  for (let j = 0; j < FAD_ROWS; ++j) { const p = j < n ? pOn : pOff; L.add(p, 0, j); L.add(p, 1, j); }
   ctx.fillStyle = C.off; ctx.fill(pOff);
   ctx.fillStyle = dis ? C.dLit : C.acc; ctx.fill(pOn);
   T('GR', cx, 425, LABEL, dis ? C.dText : C.ink, 'center');
@@ -419,12 +432,9 @@ function drawBand(i) {
 }
 
 function drawLogo() {
-  const P = 4, D = 3, on = new Path2D(), acc = new Path2D();
-  let x = 30;
-  ['M', 'B', 'C', '4'].forEach((ch, n) => {
-    LOGO[ch].forEach((row, r) => [...row].forEach((bit, c) => { if (bit === '1') cellTo(n === 3 ? acc : on, x + c * P, 25.5 + r * P, D, D); }));
-    x += 5 * P;
-  });
+  const L = Lat(30, 25.5), on = new Path2D(), acc = new Path2D();
+  ['M', 'B', 'C', '4'].forEach((ch, n) =>
+    LOGO[ch].forEach((row, r) => [...row].forEach((bit, c) => { if (bit === '1') L.add(n === 3 ? acc : on, n * 5 + c, r); })));
   ctx.fillStyle = C.ink; ctx.fill(on);
   ctx.fillStyle = C.acc; ctx.fill(acc);
 }

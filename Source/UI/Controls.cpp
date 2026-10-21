@@ -90,21 +90,23 @@ void CellFader::paint (juce::Graphics& g)
     const auto capColour = dim ? Palette::dKnob : Palette::ink;
     const auto textColour = dim ? Palette::dText : Palette::ink;
 
+    // whole-pixel lattice: cells and gaps keep one size at any UI scale
+    const float cy = (float) getHeight() * 0.5f;
+    const Draw::Lattice lat = vertical() ? Draw::Lattice (px, vCx - 3.5f, vCellsTop, Grid::pitch, Grid::cell)
+                                         : Draw::Lattice (px, hCellsX, cy - 1.5f, Grid::pitch, Grid::cell);
     if (vertical())
     {
         for (int j = 0; j < n; ++j)
         {
             auto& list = j == r ? cap : (j >= lo && j <= hi ? litCells : offCells);
-            const float y = vCellsTop + Grid::pitch * (float) (n - 1 - j);
-            list.addWithoutMerging (px.cell (vCx - 3.5f, y));
-            list.addWithoutMerging (px.cell (vCx + 0.5f, y));
+            list.addWithoutMerging (lat.at (0, n - 1 - j));
+            list.addWithoutMerging (lat.at (1, n - 1 - j));
         }
     }
     else
     {
-        const float y = (float) getHeight() * 0.5f - 1.5f;
         for (int j = 0; j < n; ++j)
-            (j == r ? cap : (j < r ? litCells : offCells)).addWithoutMerging (px.cell (hCellsX + Grid::pitch * (float) j, y));
+            (j == r ? cap : (j < r ? litCells : offCells)).addWithoutMerging (lat.at (j, 0));
     }
 
     g.setColour (Palette::off);              g.fillRectList (offCells);
@@ -112,18 +114,18 @@ void CellFader::paint (juce::Graphics& g)
     g.setColour (capColour);                 g.fillRectList (cap);
 
     const float needle = dragging ? 1.0f : 0.5f;
+    const float half = lat.cellSize() * 0.5f;
     using J = juce::Justification;
     if (vertical())
     {
-        Draw::lineH (g, px, vCx - 9.0f, vCx + 9.0f, vCellsTop + Grid::pitch * (float) (n - 1 - r) + 1.5f, capColour, needle);
+        Draw::lineH (g, px, vCx - 9.0f, vCx + 9.0f, lat.y (n - 1 - r) + half, capColour, needle);
         Draw::text (g, label, vCx, vLabelY, Fonts::Role::label, textColour, J::centred);
         if (! editor.isVisible())
             Draw::text (g, formatValue (value, format), vCx, vValueY, Fonts::Role::value, textColour, J::centred);
     }
     else
     {
-        const float cy = (float) getHeight() * 0.5f;
-        Draw::lineV (g, px, hCellsX + Grid::pitch * (float) r + 1.5f, cy - 5.0f, cy + 5.0f, capColour, needle);
+        Draw::lineV (g, px, lat.x (r) + half, cy - 5.0f, cy + 5.0f, capColour, needle);
         Draw::text (g, label, hLabelX, cy, Fonts::Role::label, textColour);
         if (! editor.isVisible())
             Draw::text (g, formatValue (value, format), hValueR, cy, Fonts::Role::value, textColour, J::right);

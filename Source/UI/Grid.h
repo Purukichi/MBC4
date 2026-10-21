@@ -17,11 +17,10 @@ namespace Grid
     // cells
     constexpr float pitch = 4.0f, cell = 3.0f;
 
-    // graph plot (window coordinates): 225 x 65 cells, +6 .. -72 dB
+    // graph plot (window coordinates): 225 x 65 cells at 100 %, +6 .. -72 dB
     constexpr int plotL = 150, plotR = 1050, plotT = 80, plotB = 340;
     constexpr int plotCols = 225, plotRows = 65;
     constexpr float maxDb = 6.0f, minDb = -72.0f;
-    constexpr float dbPerRow = (maxDb - minDb) / (float) plotRows;
     constexpr int readoutTop = 352;                   // meter peak readouts / frequency labels
 
     // vertical faders (window y): label row, 40 cells, value row

@@ -71,9 +71,25 @@ juce::Rectangle<float> Draw::Px::rect (float x, float y, float w, float h) const
     return { x0, y0, juce::jmax (1.0f / k, snapX (x + w) - x0), juce::jmax (1.0f / k, snapY (y + h) - y0) };
 }
 
-juce::Rectangle<float> Draw::Px::cell (float x, float y) const noexcept
+//==============================================================================
+Draw::Lattice::Lattice (const Px& px, float x, float y, float pitch, float cellSize)
+    : k (px.k), ox (px.ox), oy (px.oy)
 {
-    return rect (x, y, Grid::cell, Grid::cell);
+    gap = juce::jmax (1, juce::roundToInt ((pitch - cellSize) * k));
+    P   = juce::jmax (gap + 1, juce::roundToInt (pitch * k));
+    C   = P - gap;
+    dx0 = juce::roundToInt ((x + ox) * k);
+    dy0 = juce::roundToInt ((y + oy) * k);
+}
+
+juce::Rectangle<float> Draw::Lattice::span (int i, int j, int ni, int nj) const noexcept
+{
+    return { x (i), y (j), (float) (ni * P - gap) / k, (float) (nj * P - gap) / k };
+}
+
+int Draw::Lattice::fit (float length) const noexcept
+{
+    return juce::jmax (1, (juce::roundToInt (length * k) + gap) / P);
 }
 
 //==============================================================================
@@ -194,25 +210,29 @@ namespace
 
 void Draw::dotNumber (juce::Graphics& g, const Px& px, const juce::String& s, float cx, float top, juce::Colour c)
 {
-    constexpr float P = 2.0f, D = 1.6f;
-    auto adv = [] (const Glyph& gl) { return (float) std::strlen (gl[0]) * P + P; };
-
-    float w = -P;
+    // glyph columns (1 empty column between glyphs), on a 2 px pitch
+    int cols = -1;
     for (auto ch : s)
         if (auto* gl = digitGlyph (ch))
-            w += adv (*gl);
+            cols += (int) std::strlen ((*gl)[0]) + 1;
+    if (cols <= 0)
+        return;
+
+    const Lattice probe (px, 0.0f, 0.0f, 2.0f, 1.6f);
+    const Lattice lat (px, cx - probe.extent (cols) * 0.5f, top, 2.0f, 1.6f);
 
     juce::RectangleList<float> on, offDots;
-    float x = cx - w * 0.5f;
+    int col0 = 0;
     for (auto ch : s)
     {
         auto* gl = digitGlyph (ch);
         if (gl == nullptr)
             continue;
+        const int w = (int) std::strlen ((*gl)[0]);
         for (int r = 0; r < 7; ++r)
-            for (int col = 0; (*gl)[(size_t) r][col] != 0; ++col)
-                ((*gl)[(size_t) r][col] == '1' ? on : offDots).addWithoutMerging (px.rect (x + (float) col * P, top + (float) r * P, D, D));
-        x += adv (*gl);
+            for (int col = 0; col < w; ++col)
+                ((*gl)[(size_t) r][col] == '1' ? on : offDots).addWithoutMerging (lat.at (col0 + col, r));
+        col0 += w + 1;
     }
     g.setColour (Palette::off);
     g.fillRectList (offDots);
@@ -228,26 +248,17 @@ void Draw::logo (juce::Graphics& g, const Px& px, float x, float y)
         { "0111","1000","1000","1000","0111" },    // C
         { "1010","1010","1111","0010","0010" } };  // 4
 
+    const Lattice lat (px, x, y, Grid::pitch, Grid::cell);
     juce::RectangleList<float> ink, acc;
     for (int n = 0; n < 4; ++n)
         for (int r = 0; r < 5; ++r)
             for (int c = 0; c < 4; ++c)
                 if (letters[n][(size_t) r][c] == '1')
-                    (n == 3 ? acc : ink).addWithoutMerging (px.cell (x + (float) (n * 5 + c) * Grid::pitch, y + (float) r * Grid::pitch));
+                    (n == 3 ? acc : ink).addWithoutMerging (lat.at (n * 5 + c, r));
     g.setColour (Palette::ink);
     g.fillRectList (ink);
     g.setColour (Palette::accent);
     g.fillRectList (acc);
-}
-
-void Draw::cells (juce::Graphics& g, const Px& px, float x, float y, int cols, int rows, juce::Colour c)
-{
-    juce::RectangleList<float> list;
-    for (int r = 0; r < rows; ++r)
-        for (int col = 0; col < cols; ++col)
-            list.addWithoutMerging (px.cell (x + (float) col * Grid::pitch, y + (float) r * Grid::pitch));
-    g.setColour (c);
-    g.fillRectList (list);
 }
 
 //==============================================================================
