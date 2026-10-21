@@ -301,6 +301,7 @@ int main (int argc, char** argv)
         p.prepareToPlay (sr, block);
 
         std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+        ed->setSize (1240, 800);   // base size: the 2nd argument sets the render scale
 
         // pinkish noise + a kick-like low sine so every band moves
         juce::AudioBuffer<float> buf (2, block);

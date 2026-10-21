@@ -29,6 +29,7 @@ jobs:
           ditto -c -k --keepParent "$ART/VST3/MBC4.vst3"      dist/MBC4-mac-VST3.zip
           ditto -c -k --keepParent "$ART/AU/MBC4.component"   dist/MBC4-mac-AU.zip
           ditto -c -k --keepParent "$ART/Standalone/MBC4.app" dist/MBC4-mac-Standalone.zip
+          for z in dist/*.zip; do zip -j "$z" Resources/Fonts/OFL.txt; done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -57,6 +58,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path build/MBC4_artefacts/Release/VST3/MBC4.vst3 -DestinationPath dist/MBC4-win-VST3.zip
           Compress-Archive -Path build/MBC4_artefacts/Release/Standalone/MBC4.exe -DestinationPath dist/MBC4-win-Standalone.zip
+          Get-ChildItem dist/*.zip | ForEach-Object { Compress-Archive -Update -Path Resources/Fonts/OFL.txt -DestinationPath $_.FullName }
 
       - uses: actions/upload-artifact@v4
         with:

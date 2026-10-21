@@ -5,11 +5,25 @@
 namespace
 {
     constexpr float tiltDbPerOct = 3.0f;
+    constexpr float silentDb = Grid::minDb - 20.0f;
 
-    juce::String shortFreq (float f)
+    juce::String hzText (float f)
     {
-        return f >= 1000.0f ? juce::String (f / 1000.0f, f >= 10000.0f ? 1 : 2) + "k" : juce::String (juce::roundToInt (f));
+        return f >= 1000.0f ? juce::String (f / 1000.0f, f >= 10000.0f ? 1 : 2) + "kHz" : juce::String (juce::roundToInt (f)) + " Hz";
     }
+
+    int rowsFor (float db)
+    {
+        return juce::jlimit (0, Grid::plotRows, (int) std::floor ((db - Grid::minDb) / Grid::dbPerRow + 1.0e-4f));
+    }
+
+    float roundSignificant (float f, int digits)
+    {
+        const float e = std::pow (10.0f, std::floor (std::log10 (f)) - (float) (digits - 1));
+        return std::round (f / e) * e;
+    }
+
+    bool fineMods (const juce::ModifierKeys& m) { return m.isShiftDown() || m.isCtrlDown() || m.isCommandDown(); }
 }
 
 GraphView::GraphView (MBC4Processor& p) : proc (p)
@@ -21,26 +35,33 @@ GraphView::GraphView (MBC4Processor& p) : proc (p)
     for (int b = 0; b < MBC4Processor::numBands; ++b)
     {
         threshP[b] = s.getParameter (MBC4Processor::bandParamId (b, "thresh"));
-        ratioP[b]  = s.getParameter (MBC4Processor::bandParamId (b, "ratio"));
-        soloP[b]   = s.getParameter (MBC4Processor::bandParamId (b, "solo"));
-        muteP[b]   = s.getParameter (MBC4Processor::bandParamId (b, "mute"));
         bypassP[b] = s.getParameter (MBC4Processor::bandParamId (b, "bypass"));
     }
 
     fftBuf.resize ((size_t) fftSize * 2, 0.0f);
     scratch.resize ((size_t) AnalyzerFifo::capacity, 0.0f);
-    lvlDisp.fill (-100.0f);
-    lvlHold.fill (-100.0f);
+    pre.display.fill (silentDb);
+    post.display.fill (silentDb);
 
-    freqEditor.setFont (Fonts::ui (12.0f));
-    freqEditor.setJustification (juce::Justification::centred);
-    freqEditor.setInputRestrictions (10, "0123456789.kKhHzZ ");
-    freqEditor.onReturnKey = [this] { commitCrossoverEdit(); };
-    freqEditor.onFocusLost = [this] { commitCrossoverEdit(); };
-    freqEditor.onEscapeKey = [this] { editingIndex = -1; freqEditor.setVisible (false); };
-    addChildComponent (freqEditor);
+    for (int c = 0; c < numCols; ++c)
+        colHz[(size_t) c] = minHz * std::pow (maxHz / minHz, ((float) c + 0.5f) / (float) numCols);
 
-    setOpaque (false);   // rounded corners show the window behind
+    modePill.setTooltip (juce::String::fromUTF8 ("Analyzer\nスペクトラムの表示。IN+OUT / OUT / IN / OFF。"));
+    modePill.onChange = [this] (int i)
+    {
+        mode = (AnalyzerMode) i;
+        if (onModeChanged)
+            onModeChanged (mode);
+        repaint();
+    };
+    addAndMakeVisible (modePill);
+}
+
+void GraphView::setAnalyzerMode (AnalyzerMode m)
+{
+    mode = m;
+    modePill.setSelected ((int) m, false);
+    repaint();
 }
 
 //==============================================================================
@@ -56,7 +77,12 @@ float GraphView::xToFreq (float x) const noexcept
 
 float GraphView::dbToY (float db) const noexcept
 {
-    return juce::jmap (db, maxDb, minDb, plot.getY(), plot.getBottom());
+    return juce::jmap (db, Grid::maxDb, Grid::minDb, plot.getY(), plot.getBottom());
+}
+
+float GraphView::yToDb (float y) const noexcept
+{
+    return juce::jmap (y, plot.getY(), plot.getBottom(), Grid::maxDb, Grid::minDb);
 }
 
 float GraphView::crossoverHz (int i) const
@@ -75,22 +101,13 @@ int GraphView::bandAt (float x) const
     return 3;
 }
 
-juce::Rectangle<float> GraphView::tagBounds (int i) const
-{
-    return juce::Rectangle<float> (48.0f, 20.0f).withCentre ({ freqToX (crossoverHz (i)), plot.getY() - Grid::plotTop * 0.5f });
-}
-
 int GraphView::crossoverAt (juce::Point<float> p) const
 {
-    for (int i = 0; i < 3; ++i)
-        if (tagBounds (i).contains (p))
-            return i;
-
-    if (! plot.contains (p))
+    if (p.y < plot.getY() || p.y > plot.getBottom())
         return -1;
 
     int best = -1;
-    float bestDist = 6.0f;
+    float bestDist = 4.5f;
     for (int i = 0; i < 3; ++i)
     {
         const float d = std::abs (freqToX (crossoverHz (i)) - p.x);
@@ -99,28 +116,29 @@ int GraphView::crossoverAt (juce::Point<float> p) const
     return best;
 }
 
-//==============================================================================
-void GraphView::resized()
+bool GraphView::nearThreshold (juce::Point<float> p, int band) const
 {
-    auto r = getLocalBounds().toFloat();
-    plot = r.withTrimmedRight ((float) Grid::plotRight).withTrimmedTop ((float) Grid::plotTop).withTrimmedBottom ((float) Grid::plotBottom);
-
-    // one analyser point every 2 px
-    const int numPoints = juce::jmax (2, (int) (plot.getWidth() / 2.0f));
-    pointHz.resize ((size_t) numPoints);
-    pointX.resize ((size_t) numPoints);
-    for (int i = 0; i < numPoints; ++i)
-    {
-        pointX[(size_t) i]  = plot.getX() + plot.getWidth() * (float) i / (float) (numPoints - 1);
-        pointHz[(size_t) i] = xToFreq (pointX[(size_t) i]);
-    }
-
-    for (auto* s : { &pre, &post })
-        s->display.assign ((size_t) numPoints, minDb - 20.0f);
-
+    const float thr = threshP[band]->convertFrom0to1 (threshP[band]->getValue());
+    return std::abs (p.y - dbToY (thr)) <= 4.0f;
 }
 
 //==============================================================================
+void GraphView::resized()
+{
+    // window coordinates -> local
+    plot = juce::Rectangle<float> ((float) (Grid::plotL - getX()), (float) (Grid::plotT - getY()),
+                                   (float) (Grid::plotR - Grid::plotL), (float) (Grid::plotB - Grid::plotT));
+
+    const int w = modePill.getIdealWidth();
+    modePill.setBounds (Grid::colR - 10 - getX() - w, 7, w, 16);
+}
+
+//==============================================================================
+void GraphView::drainFifo (AnalyzerFifo& fifo)
+{
+    while (fifo.pull (scratch.data(), (int) scratch.size()) > 0) {}
+}
+
 void GraphView::pullAndAnalyse (AnalyzerFifo& fifo, Spectrum& s)
 {
     int got;
@@ -135,13 +153,12 @@ void GraphView::pullAndAnalyse (AnalyzerFifo& fifo, Spectrum& s)
     }
 
     const double sr = proc.getSampleRate();
-    const auto numPoints = s.display.size();
 
-    if (s.newSamples < fftSize / 4 || sr <= 0.0 || numPoints < 2)
+    if (s.newSamples < fftSize / 4 || sr <= 0.0)
     {
-        // no fresh audio: let the curve fall
+        // no fresh audio: let the spectrum fall
         for (auto& v : s.display)
-            v = juce::jmax (minDb - 20.0f, v - 1.5f);
+            v = juce::jmax (silentDb, v - 1.5f);
         return;
     }
     s.newSamples = 0;
@@ -160,11 +177,10 @@ void GraphView::pullAndAnalyse (AnalyzerFifo& fifo, Spectrum& s)
 
     // 1/6-octave smoothing: average the power of all bins within +-1/12 octave
     static const float halfWidth = std::pow (2.0f, 1.0f / 12.0f);
-    frame.resize (numPoints);
 
-    for (size_t i = 0; i < numPoints; ++i)
+    for (int i = 0; i < numCols; ++i)
     {
-        const float f   = pointHz[i];
+        const float f   = colHz[(size_t) i];
         const float pLo = f / halfWidth / binHz, pHi = f * halfWidth / binHz;
 
         float power;
@@ -188,233 +204,183 @@ void GraphView::pullAndAnalyse (AnalyzerFifo& fifo, Spectrum& s)
             power /= (float) (b1 - b0 + 1);
         }
 
-        frame[i] = juce::Decibels::gainToDecibels (std::sqrt (power) * norm, -140.0f)
-                 + tiltDbPerOct * std::log2 (f / 1000.0f);
+        frame[(size_t) i] = juce::Decibels::gainToDecibels (std::sqrt (power) * norm, -140.0f)
+                          + tiltDbPerOct * std::log2 (f / 1000.0f);
     }
 
-    // light spatial smoothing across neighbouring points, then ballistics
-    for (size_t i = 0; i < numPoints; ++i)
+    // light smoothing across neighbouring columns, then ballistics
+    for (int i = 0; i < numCols; ++i)
     {
         float acc = 0.0f, wsum = 0.0f;
         for (int k = -2; k <= 2; ++k)
         {
-            const auto j = (size_t) juce::jlimit (0, (int) numPoints - 1, (int) i + k);
+            const auto j = (size_t) juce::jlimit (0, numCols - 1, i + k);
             const float wgt = (float) (3 - std::abs (k));
             acc += frame[j] * wgt; wsum += wgt;
         }
         const float db = acc / wsum;
 
-        auto& v = s.display[i];
+        auto& v = s.display[(size_t) i];
         v = db > v ? v + (db - v) * 0.5f : v + (db - v) * 0.14f;
     }
 }
 
-void GraphView::buildPath (Spectrum& s)
-{
-    s.path.clear();
-    s.fill.clear();
-    if (s.display.empty())
-        return;
-
-    const float bottom = plot.getBottom() + 2.0f;
-    auto yAt = [&] (size_t i) { return juce::jlimit (plot.getY(), bottom, dbToY (s.display[i])); };
-
-    // curve through the points: each point is a control point, the midpoints are on the curve
-    s.path.startNewSubPath (pointX.front(), yAt (0));
-    for (size_t i = 1; i + 1 < s.display.size(); ++i)
-        s.path.quadraticTo (pointX[i], yAt (i), (pointX[i] + pointX[i + 1]) * 0.5f, (yAt (i) + yAt (i + 1)) * 0.5f);
-    s.path.lineTo (pointX.back(), yAt (s.display.size() - 1));
-
-    s.fill = s.path;
-    s.fill.lineTo (pointX.back(), bottom);
-    s.fill.lineTo (pointX.front(), bottom);
-    s.fill.closeSubPath();
-}
-
 void GraphView::updateFrame()
 {
-    if (mode == AnalyzerMode::both || mode == AnalyzerMode::pre)   pullAndAnalyse (proc.preFifo, pre);
-    else                                                            { float d[512]; while (proc.preFifo.pull (d, 512) > 0) {} }
+    // the input is also needed in "out" mode: it shows how much each band removes
+    if (mode != AnalyzerMode::off) pullAndAnalyse (proc.preFifo, pre);
+    else                           drainFifo (proc.preFifo);
 
-    if (mode == AnalyzerMode::both || mode == AnalyzerMode::post)  pullAndAnalyse (proc.postFifo, post);
-    else                                                            { float d[512]; while (proc.postFifo.pull (d, 512) > 0) {} }
-
-    buildPath (pre);
-    buildPath (post);
+    if (mode == AnalyzerMode::both || mode == AnalyzerMode::post) pullAndAnalyse (proc.postFifo, post);
+    else                                                          drainFifo (proc.postFifo);
 
     for (size_t b = 0; b < (size_t) MBC4Processor::numBands; ++b)
     {
         const float gr = proc.engine.getGainReductionDb ((int) b);
         grDisp[b] = gr < grDisp[b] ? gr : grDisp[b] + (gr - grDisp[b]) * 0.25f;
-
-        const float lv = proc.engine.getBandLevelDb ((int) b);
-        lvlDisp[b] = lv > lvlDisp[b] ? lv : juce::jmax (lv, lvlDisp[b] - 0.8f);
-
-        // slow, readable peak hold for the level marker
-        if (lv >= lvlHold[b]) { lvlHold[b] = lv; lvlHoldTime[b] = 45; }
-        else if (--lvlHoldTime[b] < 0) lvlHold[b] = juce::jmax (lv, lvlHold[b] - 0.25f);
     }
 
     repaint();
 }
 
 //==============================================================================
+void GraphView::paintCells (juce::Graphics& g)
+{
+    const Draw::Px px (g, *this);
+    const bool showOut = mode == AnalyzerMode::both || mode == AnalyzerMode::post;
+    const bool showIn  = mode != AnalyzerMode::off;
+
+    // one rectangle list per colour; runs of cells are filled as single rectangles
+    // and the 1 px gaps between cells are drawn over them afterwards
+    constexpr int numColours = (int) Palette::ramp.size() + 3;   // ramp, accent, ghost, off
+    std::array<juce::RectangleList<float>, numColours> lists;
+    const int accentIdx = (int) Palette::ramp.size(), ghostIdx = accentIdx + 1, offIdx = accentIdx + 2;
+
+    auto rampIndex = [] (int j) { return juce::jlimit (0, (int) Palette::ramp.size() - 1,
+                                                       (int) ((float) j / (float) numRows * (float) Palette::ramp.size() * 1.15f)); };
+
+    for (int c = 0; c < numCols; ++c)
+    {
+        const int b = bandAt (freqToX (colHz[(size_t) c]));
+        const float inDb = pre.display[(size_t) c];
+        const float gr = bypassP[b]->getValue() > 0.5f ? 0.0f : grDisp[(size_t) b];
+
+        const int nIn  = showIn  ? rowsFor (inDb) : 0;
+        const int nOut = showOut ? rowsFor (post.display[(size_t) c]) : 0;
+        const int nCut = rowsFor (inDb + gr);
+
+        auto colourOf = [&] (int j)
+        {
+            if (mode == AnalyzerMode::pre)
+                return j < nIn ? rampIndex (j) : offIdx;
+            if (j < nOut)                return rampIndex (j);
+            if (j < nIn && j >= nCut)    return accentIdx;   // removed by the compressor
+            if (j < nIn && showIn && mode == AnalyzerMode::both) return ghostIdx;
+            return offIdx;
+        };
+
+        const float x = plot.getX() + Grid::pitch * (float) c;
+        int runStart = 0, runColour = colourOf (0);
+        for (int j = 1; j <= numRows; ++j)
+        {
+            const int col = j < numRows ? colourOf (j) : -1;
+            if (col == runColour)
+                continue;
+
+            // rows [runStart, j) counted from the bottom
+            const float top = plot.getY() + Grid::pitch * (float) (numRows - j);
+            lists[(size_t) runColour].addWithoutMerging (px.rect (x, top, Grid::cell, Grid::pitch * (float) (j - runStart)));
+            runStart = j;
+            runColour = col;
+        }
+    }
+
+    g.setColour (Palette::off);    g.fillRectList (lists[(size_t) offIdx]);
+    g.setColour (Palette::ghost);  g.fillRectList (lists[(size_t) ghostIdx]);
+    for (size_t i = 0; i < Palette::ramp.size(); ++i)
+    {
+        g.setColour (Palette::ramp[i]);
+        g.fillRectList (lists[i]);
+    }
+    g.setColour (Palette::accent); g.fillRectList (lists[(size_t) accentIdx]);
+
+    // gaps between cells, in the background colour
+    juce::RectangleList<float> gaps;
+    for (int c = 0; c < numCols; ++c)
+    {
+        const float x = plot.getX() + Grid::pitch * (float) c + Grid::cell;
+        const float x0 = px.snapX (x);
+        gaps.addWithoutMerging ({ x0, plot.getY(), px.snapX (x + 1.0f) - x0, plot.getHeight() });
+    }
+    for (int r = 0; r < numRows; ++r)
+    {
+        const float y = plot.getY() + Grid::pitch * (float) r + Grid::cell;
+        const float y0 = px.snapY (y);
+        gaps.addWithoutMerging ({ plot.getX(), y0, plot.getWidth(), px.snapY (y + 1.0f) - y0 });
+    }
+    g.setColour (Palette::cell);
+    g.fillRectList (gaps);
+}
+
 void GraphView::paint (juce::Graphics& g)
 {
-    // rounded block: fill, and keep everything inside the corners
-    {
-        juce::Path shape;
-        shape.addRoundedRectangle (getLocalBounds().toFloat(), Palette::radius);
-        g.reduceClipRegion (shape);
-    }
-    g.fillAll (Palette::plot);
+    const Draw::Px px (g, *this);
+    using J = juce::Justification;
+    using R = Fonts::Role;
 
-    const auto ink  = Palette::text;
-    const auto soft = Palette::soft;
-    auto hline = [&] (float y, float x0, float x1) { g.fillRect (juce::Rectangle<float> (x0, y - Palette::hair * 0.5f, x1 - x0, Palette::hair)); };
-    auto vline = [&] (float x, float y0, float y1) { g.fillRect (juce::Rectangle<float> (x - Palette::hair * 0.5f, y0, Palette::hair, y1 - y0)); };
+    Draw::sectionHeader (g, "02", "SPLIT", 10.0f, 15.0f);
 
-    // ---- grid -------------------------------------------------------------
-    g.setFont (Fonts::ui (11.0f));
-    for (float f : { 30.0f, 40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 90.0f, 100.0f, 200.0f, 300.0f, 400.0f, 500.0f, 600.0f, 700.0f, 800.0f, 900.0f,
-                     1000.0f, 2000.0f, 3000.0f, 4000.0f, 5000.0f, 6000.0f, 7000.0f, 8000.0f, 9000.0f, 10000.0f })
-    {
-        const bool major = (f == 100.0f || f == 1000.0f || f == 10000.0f);
-        const float x = freqToX (f);
-        g.setColour (ink.withAlpha (major ? 0.13f : 0.05f));
-        vline (x, plot.getY(), plot.getBottom());
+    paintCells (g);
 
-        if (major || f == 50.0f || f == 500.0f || f == 5000.0f)
-        {
-            const auto txt = f >= 1000.0f ? juce::String ((int) (f / 1000.0f)) + "k" : juce::String ((int) f);
-            g.setColour (soft);
-            g.drawText (txt, juce::Rectangle<float> (x - 20.0f, plot.getBottom() + 4.0f, 40.0f, 16.0f), juce::Justification::centred);
-        }
-    }
+    // scale: numbers only
+    for (float db = 0.0f; db >= Grid::minDb; db -= 12.0f)
+        Draw::text (g, juce::String ((int) db), plot.getRight() + 7.0f, dbToY (db), R::tick, Palette::ink2);
 
-    for (float db = 0.0f; db >= minDb; db -= 12.0f)
-    {
-        const float y = dbToY (db);
-        g.setColour (ink.withAlpha (db == 0.0f ? 0.15f : 0.05f));
-        hline (y, plot.getX(), plot.getRight());
-        g.setColour (soft);
-        g.drawText (juce::String ((int) db), juce::Rectangle<float> (plot.getRight() + 8.0f, y - 8.0f, 30.0f, 16.0f),
-                    juce::Justification::centredLeft);
-    }
+    const std::pair<float, const char*> freqs[] = { { 50.0f, "50" }, { 100.0f, "100" }, { 200.0f, "200" }, { 500.0f, "500" },
+                                                    { 1000.0f, "1k" }, { 2000.0f, "2k" }, { 5000.0f, "5k" }, { 10000.0f, "10k" } };
+    const float labelY = (float) (Grid::readoutTop - getY());
+    for (auto& [f, t] : freqs)
+        Draw::text (g, t, freqToX (f), labelY, R::tick, Palette::ink2, J::centred);
 
-    // ---- band regions -----------------------------------------------------
-    bool anySolo = false;
-    for (auto* s : soloP) anySolo = anySolo || s->getValue() > 0.5f;
-
-    for (int b = 0; b < MBC4Processor::numBands; ++b)
-    {
-        const float x0 = bandLeftX (b), x1 = bandRightX (b);
-        const auto region = juce::Rectangle<float> (x0, plot.getY(), x1 - x0, plot.getHeight());
-
-    }
-
-    // ---- spectrum ---------------------------------------------------------
-    const bool showPre  = mode == AnalyzerMode::both || mode == AnalyzerMode::pre;
-    const bool showPost = mode == AnalyzerMode::both || mode == AnalyzerMode::post;
-    {
-        juce::Graphics::ScopedSaveState ss (g);
-        g.reduceClipRegion (plot.toNearestInt());
-
-        if (showPost)
-        {
-            g.setGradientFill (juce::ColourGradient (ink.withAlpha (0.09f), 0.0f, plot.getY(),
-                                                     ink.withAlpha (0.01f), 0.0f, plot.getBottom(), false));
-            g.fillPath (post.fill);
-            g.setColour (ink.withAlpha (0.85f));
-            g.strokePath (post.path, juce::PathStrokeType (0.8f));
-        }
-
-        if (showPre)
-        {
-            g.setColour (mode == AnalyzerMode::pre ? ink.withAlpha (0.85f) : soft.withMultipliedAlpha (0.7f));
-            g.strokePath (pre.path, juce::PathStrokeType (0.6f));
-        }
-    }
-
-    // ---- per band overlays --------------------------------------------------
-    const float pxPerDb = plot.getHeight() / (maxDb - minDb);
-
-    for (int b = 0; b < MBC4Processor::numBands; ++b)
-    {
-        const float x0 = bandLeftX (b), x1 = bandRightX (b);
-        const float w = x1 - x0;
-        const float cx = (x0 + x1) * 0.5f;
-        const bool bypassed = bypassP[b]->getValue() > 0.5f;
-        const bool audible = muteP[b]->getValue() < 0.5f && (! anySolo || soloP[b]->getValue() > 0.5f);
-
-        // muted / not soloed: wash the band out
-        if (! audible)
-        {
-            g.setColour (Palette::plot.withAlpha (0.65f));
-            g.fillRect (juce::Rectangle<float> (x0, plot.getY(), w, plot.getHeight()));
-        }
-
-        // band letter, top left of its section
-        g.setColour (soft);
-        g.setFont (Fonts::ui (12.0f));
-        g.drawText (juce::String::charToString ((juce::juce_wchar) ('A' + b)),
-                    juce::Rectangle<float> (x0 + 8.0f, plot.getY() + 8.0f, 16.0f, 16.0f), juce::Justification::centredLeft, false);
-
-        // gain reduction, hanging from the 0 dB line
-        const float gr = bypassed ? 0.0f : grDisp[(size_t) b];
-        if (gr < -0.05f)
-        {
-            const float barW = juce::jlimit (4.0f, 30.0f, w * 0.2f);
-            auto bar = juce::Rectangle<float> (cx - barW * 0.5f, dbToY (0.0f), barW, -gr * pxPerDb);
-            g.setColour (ink.withAlpha (0.10f));
-            g.fillRect (bar);
-            g.setColour (ink);
-            g.fillRect (bar.removeFromBottom (0.8f));
-        }
-
-        // detected band level: live line + held hairline
-        const float lw = juce::jmax (6.0f, w * 0.36f);
-        if (lvlDisp[(size_t) b] > minDb)
-        {
-            g.setColour (soft);
-            g.fillRect (juce::Rectangle<float> (cx - lw * 0.5f, dbToY (lvlDisp[(size_t) b]) - 0.5f, lw, 1.0f));
-        }
-        if (lvlHold[(size_t) b] > minDb)
-        {
-            g.setColour (ink.withAlpha (0.6f));
-            hline (dbToY (lvlHold[(size_t) b]), cx - lw * 0.5f, cx + lw * 0.5f);
-        }
-
-        // threshold
-        const float thr = threshP[b]->convertFrom0to1 (threshP[b]->getValue());
-        const float ty = dbToY (thr);
-        g.setColour (bypassed ? soft.withMultipliedAlpha (0.6f) : ink.withAlpha (0.75f));
-        g.fillRect (juce::Rectangle<float> (x0 + 1.0f, ty - 0.375f, w - 2.0f, 0.75f));
-
-        // its value only while it is being looked at / moved
-        const bool touching = (hoverBand == b && drag == Drag::none) || (drag == Drag::threshold && dragIndex == b);
-        if (touching && w > 40.0f)
-        {
-            g.setColour (ink);
-            g.setFont (Fonts::ui (12.0f));
-            g.drawText (juce::String (thr, 1), juce::Rectangle<float> (x0 + 8.0f, ty + 4.0f, w - 16.0f, 16.0f),
-                        juce::Justification::centredLeft, false);
-        }
-    }
-
-    // ---- crossovers -------------------------------------------------------
+    // crossovers
     for (int i = 0; i < 3; ++i)
     {
-        const float x = freqToX (crossoverHz (i));
-        g.setColour (Palette::lineHi);
-        vline (x, plot.getY() - 3.0f, plot.getBottom());
-
-        const auto tag = tagBounds (i);
-        g.setColour (ink);
-        g.setFont (Fonts::ui (12.0f));
-        g.drawText (shortFreq (crossoverHz (i)), tag, juce::Justification::centred, false);
+        const bool on = (drag == Drag::crossover && dragIndex == i) || (drag == Drag::none && hot == Hot::crossover && hotIndex == i);
+        Draw::lineV (g, px, freqToX (crossoverHz (i)), plot.getY(), plot.getBottom(), Palette::ink, on ? 1.2f : 0.5f);
     }
 
+    // thresholds + band letters
+    for (int b = 0; b < MBC4Processor::numBands; ++b)
+    {
+        const float x0 = bandLeftX (b), x1 = bandRightX (b);
+        const bool bypassed = bypassP[b]->getValue() > 0.5f;
+        const bool on = (drag == Drag::threshold && dragIndex == b) || (drag == Drag::none && hot == Hot::threshold && hotIndex == b);
+        const float thr = threshP[b]->convertFrom0to1 (threshP[b]->getValue());
+
+        Draw::lineH (g, px, x0, x1, dbToY (thr), bypassed ? Palette::dKnob : Palette::ink, on ? 1.2f : 0.5f);
+        Draw::text (g, juce::String::charToString ((juce::juce_wchar) ('A' + b)), x0 + 3.0f, plot.getY() - 10.0f,
+                    R::label, bypassed ? Palette::dText : Palette::ink2);
+    }
+
+    // value bubble for whatever is under the mouse / being moved
+    const auto kind  = drag == Drag::crossover ? Hot::crossover : drag == Drag::threshold ? Hot::threshold : hot;
+    const int  index = drag != Drag::none ? dragIndex : hotIndex;
+
+    if (kind == Hot::threshold && index >= 0)
+    {
+        const float thr = threshP[index]->convertFrom0to1 (threshP[index]->getValue());
+        Draw::bubble (g, juce::String::charToString ((juce::juce_wchar) ('A' + index)) + "  " + formatValue (thr, Format::dB),
+                      mouse.x, dbToY (thr) - 12.0f, plot.getX(), plot.getRight());
+    }
+    else if (kind == Hot::crossover && index >= 0)
+    {
+        Draw::bubble (g, hzText (crossoverHz (index)), freqToX (crossoverHz (index)), plot.getY() + 10.0f, plot.getX(), plot.getRight());
+    }
+    else if (kind == Hot::plot)
+    {
+        Draw::bubble (g, hzText (xToFreq (mouse.x)) + "  " + numberText (yToDb (mouse.y)) + " dB",
+                      mouse.x, mouse.y - 14.0f, plot.getX(), plot.getRight());
+    }
 }
 
 //==============================================================================
@@ -423,57 +389,35 @@ void GraphView::setParam (juce::RangedAudioParameter* p, float value)
     p->setValueNotifyingHost (p->convertTo0to1 (value));
 }
 
-void GraphView::editCrossover (int i)
-{
-    editingIndex = i;
-    freqEditor.setBounds (tagBounds (i).expanded (8.0f, 1.0f).toNearestInt());
-    freqEditor.setText (shortFreq (crossoverHz (i)), false);
-    freqEditor.setVisible (true);
-    freqEditor.grabKeyboardFocus();
-    freqEditor.selectAll();
-}
-
-void GraphView::commitCrossoverEdit()
-{
-    if (editingIndex < 0)
-        return;
-
-    const int i = editingIndex;
-    editingIndex = -1;
-    freqEditor.setVisible (false);
-
-    auto* p = xParam[i];
-    const float typed = p->getValueForText (freqEditor.getText());   // normalised
-    if (freqEditor.getText().trim().isEmpty())
-        return;
-
-    const float lo = i > 0 ? crossoverHz (i - 1) * 1.19f : minHz;
-    const float hi = i < 2 ? crossoverHz (i + 1) / 1.19f : maxHz;
-    p->beginChangeGesture();
-    setParam (p, juce::jlimit (lo, hi, p->convertFrom0to1 (typed)));
-    p->endChangeGesture();
-    repaint();
-}
-
 void GraphView::mouseMove (const juce::MouseEvent& e)
 {
-    const int x = crossoverAt (e.position);
-    const int b = plot.contains (e.position) ? bandAt (e.position.x) : -1;
+    mouse = e.position;
+    auto newHot = Hot::none;
+    int newIndex = -1;
 
-    if (x != hoverX || b != hoverBand)
+    if (const int x = crossoverAt (e.position); x >= 0)
     {
-        hoverX = x;
-        hoverBand = b;
-        repaint();
+        newHot = Hot::crossover;
+        newIndex = x;
+    }
+    else if (plot.contains (e.position))
+    {
+        const int b = bandAt (e.position.x);
+        newHot = nearThreshold (e.position, b) ? Hot::threshold : Hot::plot;
+        newIndex = newHot == Hot::threshold ? b : -1;
     }
 
-    setMouseCursor (x >= 0 ? juce::MouseCursor::LeftRightResizeCursor
-                           : b >= 0 ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
+    hot = newHot;
+    hotIndex = newIndex;
+    setMouseCursor (hot == Hot::crossover ? juce::MouseCursor::LeftRightResizeCursor
+                  : hot != Hot::none     ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
+    repaint();
 }
 
 void GraphView::mouseExit (const juce::MouseEvent&)
 {
-    hoverX = hoverBand = -1;
+    hot = Hot::none;
+    hotIndex = -1;
     repaint();
 }
 
@@ -481,20 +425,11 @@ void GraphView::mouseDown (const juce::MouseEvent& e)
 {
     drag = Drag::none;
     dragParam = nullptr;
+    mouse = e.position;
     lastDragY = e.position.y;
 
     if (const int x = crossoverAt (e.position); x >= 0)
     {
-        if (e.mods.isAltDown())   // Alt+click a split: back to its default
-        {
-            auto* p = xParam[x];
-            p->beginChangeGesture();
-            p->setValueNotifyingHost (p->getDefaultValue());
-            p->endChangeGesture();
-            repaint();
-            return;
-        }
-
         drag = Drag::crossover;
         dragIndex = x;
         dragParam = xParam[x];
@@ -505,66 +440,56 @@ void GraphView::mouseDown (const juce::MouseEvent& e)
     if (! plot.contains (e.position))
         return;
 
+    // anywhere inside a band moves its threshold
     const int b = bandAt (e.position.x);
-    selected = b;
-    if (onBandSelected)
-        onBandSelected (b);
-
     drag = Drag::threshold;
     dragIndex = b;
     dragParam = threshP[b];
-    dragStartValue = dragParam->convertFrom0to1 (dragParam->getValue());
+    dragRaw = dragParam->convertFrom0to1 (dragParam->getValue());
     dragParam->beginChangeGesture();
     repaint();
 }
 
 void GraphView::mouseDrag (const juce::MouseEvent& e)
 {
+    mouse = e.position;
     if (dragParam == nullptr)
         return;
+
+    const bool fine = fineMods (e.mods);
 
     if (drag == Drag::crossover)
     {
         const float lo = dragIndex > 0 ? crossoverHz (dragIndex - 1) * 1.19f : minHz;
         const float hi = dragIndex < 2 ? crossoverHz (dragIndex + 1) / 1.19f : maxHz;
-        setParam (dragParam, juce::jlimit (lo, hi, xToFreq (e.position.x)));
+        const float f  = roundSignificant (juce::jlimit (minHz, maxHz, xToFreq (e.position.x)), fine ? 3 : 2);
+        setParam (dragParam, juce::jlimit (lo, hi, f));
         repaint();
         return;
     }
 
-    // threshold: incremental so Ctrl (or Shift) can switch to fine mode mid-drag, same 1/6 as the bars
-    const float pxPerDb = plot.getHeight() / (maxDb - minDb);
-    const bool fineMode = e.mods.isCtrlDown() || e.mods.isCommandDown() || e.mods.isShiftDown();
-    const float fine = fineMode ? 1.0f / 6.0f : 1.0f;
-    const float delta = -(e.position.y - lastDragY) / pxPerDb * fine;
+    // threshold: incremental, so the fine modifier can be pressed mid-drag
+    const float pxPerDb = plot.getHeight() / (Grid::maxDb - Grid::minDb);
+    dragRaw = juce::jlimit (-60.0f, 0.0f, dragRaw - (e.position.y - lastDragY) / pxPerDb * (fine ? 0.2f : 1.0f));
     lastDragY = e.position.y;
 
-    dragStartValue = dragParam->getNormalisableRange().snapToLegalValue (dragStartValue + delta);
-    setParam (dragParam, dragStartValue);
+    const float step = fine ? 0.1f : 1.0f;
+    setParam (dragParam, std::round (dragRaw / step) * step);
     repaint();
 }
 
-void GraphView::mouseUp (const juce::MouseEvent&)
+void GraphView::mouseUp (const juce::MouseEvent& e)
 {
     if (dragParam != nullptr)
         dragParam->endChangeGesture();
 
     dragParam = nullptr;
     drag = Drag::none;
-    repaint();
+    mouseMove (e);
 }
 
 void GraphView::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    for (int i = 0; i < 3; ++i)
-    {
-        if (tagBounds (i).contains (e.position))
-        {
-            editCrossover (i);
-            return;
-        }
-    }
-
     juce::RangedAudioParameter* p = nullptr;
 
     if (const int x = crossoverAt (e.position); x >= 0)

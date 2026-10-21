@@ -1,0 +1,612 @@
+<title>MBC4 PC1 Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chivo+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #E8E9E5; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; }
+  #tip { position: fixed; pointer-events: none; display: none; z-index: 3;
+         background: rgba(17,18,16,.96); color: #F4F4F1; border-radius: 3px; box-sizing: border-box; }
+  #tip .h { font-family: "Chivo Mono", monospace; font-weight: 400; color: #FF4D0F; text-transform: uppercase; }
+  #tip .b { font-family: "Yu Gothic UI", "Yu Gothic", "Hiragino Sans", sans-serif; line-height: 1.55; }
+  #edit { position: fixed; display: none; z-index: 4; box-sizing: border-box; margin: 0; padding: 0 2px;
+          border: 1px solid #C3C4BF; border-radius: 0; outline: none; background: #F4F4F1; color: #111210;
+          font-family: "Chivo Mono", monospace; font-weight: 300; text-align: center; }
+</style>
+<canvas id="c"></canvas>
+<div id="tip"><div class="h"></div><div class="b"></div></div>
+<input id="edit" spellcheck="false" autocomplete="off">
+<script>
+'use strict';
+// ───────────────────────────────── tokens
+const W = 1240, H = 800;
+const C = {
+  cell: '#E8E9E5', rule: '#C3C4BF', ink: '#111210', ink2: '#575854', ink3: '#8F908B',
+  off: '#DCDDD8', lit: '#B3B4AF', plot: '#F4F4F1', acc: '#FF4D0F',
+  dLit: '#CBCCC7', dKnob: '#A8A9A4', dText: '#B0B1AC', ghost: '#D3D4CF',
+};
+const RAMP = ['#C7C8C3', '#B9BAB5', '#A6A7A2', '#8F908B', '#5C5D59', '#2A2B29'];   // weak → strong
+const LABEL = { size: 8, w: 400, ls: 0.8 }, VAL = { size: 9, w: 300, ls: 0 },
+      NOTE = { size: 7.5, w: 300, ls: 0.6 }, TICK = { size: 7.5, w: 300, ls: 0 };
+
+// ───────────────────────────────── layout (10 px grid)
+const COL_L = 140, COL_R = 1100, ROW_B = 380, FRAME_B = 760;
+const PX0 = 150, PX1 = 1050, PY0 = 80, PY1 = 340;          // plot: 225 × 65 cells
+const NC = 225, NR = 65, DBT = 6, DBB = -72, DB_ROW = (DBT - DBB) / NR;
+const FAD_Y = 440, FAD_ROWS = 40;                           // vertical faders: 440 – 600
+const SL_X = 46, SL_CELLS = 32;                             // horizontal sliders, from band x0
+
+// ───────────────────────────────── canvas
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let s = 1, k = 1;
+function fit() {
+  const dpr = window.devicePixelRatio || 1;
+  s = Math.min(innerWidth / W, innerHeight / H);
+  k = s * dpr;
+  cv.width = Math.round(W * k); cv.height = Math.round(H * k);
+  cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px';
+}
+
+// pixel-snapped rect in base units (identity transform)
+function R(x, y, w, h, c) {
+  const x0 = Math.round(x * k), y0 = Math.round(y * k);
+  ctx.fillStyle = c;
+  ctx.fillRect(x0, y0, Math.max(1, Math.round((x + w) * k) - x0), Math.max(1, Math.round((y + h) * k) - y0));
+}
+function cellTo(p, x, y, w = 3, h = 3) {
+  const x0 = Math.round(x * k), y0 = Math.round(y * k);
+  p.rect(x0, y0, Math.max(1, Math.round((x + w) * k) - x0), Math.max(1, Math.round((y + h) * k) - y0));
+}
+// rules: 0.2 px
+function ruleH(x1, x2, y) { ctx.fillStyle = C.rule; ctx.fillRect(x1 * k, (y - 0.1) * k, (x2 - x1) * k, 0.2 * k); }
+function ruleV(x, y1, y2) { ctx.fillStyle = C.rule; ctx.fillRect((x - 0.1) * k, y1 * k, 0.2 * k, (y2 - y1) * k); }
+// reference lines: never under one device pixel
+const dev = t => Math.max(1, Math.round(t * k));
+function lineH(x1, x2, y, c, t = 0.5) { const d = dev(t); ctx.fillStyle = c; ctx.fillRect(Math.round(x1 * k), Math.round(y * k - d / 2), Math.round((x2 - x1) * k), d); }
+function lineV(x, y1, y2, c, t = 0.5) { const d = dev(t); ctx.fillStyle = c; ctx.fillRect(Math.round(x * k - d / 2), Math.round(y1 * k), d, Math.round((y2 - y1) * k)); }
+function frame(x, y, w, h, c) {
+  ctx.strokeStyle = c; ctx.lineWidth = 1;
+  ctx.strokeRect(Math.round(x * k) + 0.5, Math.round(y * k) + 0.5, Math.round(w * k) - 1, Math.round(h * k) - 1);
+}
+
+function font(o) { return `${o.w} ${o.size}px "Chivo Mono", monospace`; }
+function T(str, x, y, o, c = C.ink, al = 'left') {
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.font = font(o); ctx.letterSpacing = o.ls + 'px';
+  ctx.fillStyle = c; ctx.textAlign = al; ctx.textBaseline = 'middle';
+  ctx.fillText(str, al === 'center' ? x + o.ls / 2 : x, y);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+function tw(str, o) { ctx.font = font(o); ctx.letterSpacing = o.ls + 'px'; return ctx.measureText(str).width; }
+function pill(x, y, w, h, fill, stroke) {
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, h / 2);
+  ctx.fillStyle = fill; ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1 / k; ctx.stroke(); }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+function bubble(str, x, y) {
+  const w = tw(str, VAL) + 10, h = 14;
+  const bx = Math.min(Math.max(x - w / 2, PX0), PX1 - w), by = y - h / 2;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.beginPath(); ctx.roundRect(bx, by, w, h, 3); ctx.fillStyle = C.ink; ctx.fill();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  T(str, bx + w / 2, by + h / 2, VAL, C.plot, 'center');
+}
+
+// ───────────────────────────────── dot glyphs
+const DIG = {
+  '0': ['01110','10001','10001','10001','10001','10001','01110'],
+  '1': ['00100','01100','00100','00100','00100','00100','01110'],
+  '2': ['01110','10001','00001','00010','00100','01000','11111'],
+  '3': ['11111','00010','00100','00010','00001','10001','01110'],
+  '4': ['00010','00110','01010','10010','11111','00010','00010'],
+  '5': ['11111','10000','11110','00001','00001','10001','01110'],
+  '6': ['00110','01000','10000','11110','10001','10001','01110'],
+  '7': ['11111','00001','00010','00100','01000','01000','01000'],
+  '8': ['01110','10001','10001','01110','10001','10001','01110'],
+  '9': ['01110','10001','10001','01111','00001','00010','01100'],
+  '-': ['00000','00000','00000','11111','00000','00000','00000'],
+  '+': ['00000','00100','00100','11111','00100','00100','00000'],
+  '.': ['0','0','0','0','0','0','1'],
+};
+function dotNum(str, cx, top, color) {
+  const P = 2, D = 1.6;
+  const adv = ch => DIG[ch][0].length * P + P;
+  let w = -P; for (const ch of str) w += adv(ch);
+  let x = cx - w / 2;
+  const on = new Path2D(), off = new Path2D();
+  for (const ch of str) {
+    const g = DIG[ch];
+    g.forEach((row, r) => [...row].forEach((b, c) => cellTo(b === '1' ? on : off, x + c * P, top + r * P, D, D)));
+    x += adv(ch);
+  }
+  ctx.fillStyle = C.off; ctx.fill(off);
+  ctx.fillStyle = color; ctx.fill(on);
+}
+const LOGO = {
+  M: ['1001','1111','1111','1001','1001'],
+  B: ['1110','1001','1110','1001','1110'],
+  C: ['0111','1000','1000','1000','0111'],
+  '4': ['1010','1010','1111','0010','0010'],
+};
+
+// ───────────────────────────────── parameters
+const lin = (a, b) => ({ n: v => (v - a) / (b - a), v: n => a + n * (b - a) });
+const skew = (a, b, c) => { const e = Math.log(0.5) / Math.log((c - a) / (b - a));
+  return { n: v => Math.pow(Math.max(0, (v - a) / (b - a)), e), v: n => a + (b - a) * Math.pow(n, 1 / e) }; };
+const num = v => { let r = Math.round(v * 10) / 10; if (Object.is(r, -0)) r = 0; return Number.isInteger(r) ? String(r) : r.toFixed(1); };
+const fdB = v => num(v) + ' dB', fpct = v => Math.round(v) + ' %';
+const fms = v => (v < 10 ? (Math.round(v * 10) / 10).toFixed(1) : String(Math.round(v))) + ' ms';
+const fq = f => f >= 1000 ? (f / 1000).toFixed(f >= 10000 ? 1 : 2) + 'k' : String(Math.round(f));
+const fHz = f => f >= 1000 ? fq(f) + 'Hz' : Math.round(f) + ' Hz';
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+const SP = {
+  thr:  { min: -60, max: 0, def: 0, step: 1, fine: 0.1, m: lin(-60, 0), f: fdB },
+  rat:  { min: 1, max: 20, def: 2, list: [1, 1.5, 2, 3, 4, 6, 8, 10, 20], fine: 0.1, m: skew(1, 20, 4),
+          f: v => v >= 19.95 ? '20:1' : num(v) + ':1' },
+  kne:  { min: 0, max: 24, def: 6, step: 1, fine: 0.1, m: lin(0, 24), f: fdB },
+  atk:  { min: 0.1, max: 300, list: [0.1, 0.3, 1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 80, 100, 150, 200, 300],
+          fine: 0.1, m: skew(0.1, 300, 15), f: fms },
+  rls:  { min: 5, max: 3000, list: [5, 10, 20, 30, 50, 80, 120, 180, 250, 350, 500, 750, 1000, 1500, 2000, 3000],
+          fine: 1, m: skew(5, 3000, 200), f: fms },
+  rng:  { min: 0, max: 60, def: 60, step: 1, fine: 0.1, m: skew(0, 60, 18), f: fdB },
+  gain: { min: -24, max: 24, def: 0, step: 1, fine: 0.1, m: lin(-24, 24), f: fdB, bip: 0 },
+  mix:  { min: 0, max: 100, def: 100, step: 5, fine: 1, m: lin(0, 100), f: fpct },
+  look: { min: 0, max: 10, def: 0, step: 0.5, fine: 0.1, m: lin(0, 10), f: fms },
+};
+function snap(sp, v, fine) {
+  v = clamp(v, sp.min, sp.max);
+  if (fine) return clamp(Math.round(v / sp.fine) * sp.fine, sp.min, sp.max);
+  if (sp.list) { const n = sp.m.n(v); return sp.list.reduce((a, b) => Math.abs(sp.m.n(b) - n) < Math.abs(sp.m.n(a) - n) ? b : a); }
+  return clamp(Math.round(v / sp.step) * sp.step, sp.min, sp.max);
+}
+
+const ATK = [25, 15, 8, 3], RLS = [250, 180, 120, 80];
+const bands = [0, 1, 2, 3].map(i => ({
+  thr: [-16, -36, -34, -30][i], rat: [3, 4, 2, 3][i], kne: 6, atk: ATK[i], rls: RLS[i], rng: 60,
+  gain: 0, mix: 100, solo: false, mute: false, byp: false,
+  gr: 0, grPeak: 0, grShow: 0, learn: null,
+}));
+const XO_DEF = [120, 1000, 6000];
+const xo = XO_DEF.slice();
+const G = { gin: 0, gout: 0, mix: 100, look: 0, mode: 0 };
+const MODES = ['IN+OUT', 'OUT', 'IN', 'OFF'];
+
+const TIP = {
+  thr:  ['Threshold', 'この値を超えた分を圧縮します。グラフの横線をドラッグしても変えられます。'],
+  rng:  ['Range', 'ゲインリダクションの上限です。'],
+  gain: ['Gain', 'バンドの出力ゲイン（メイクアップ）。'],
+  gr:   ['Gain reduction', 'いま削られている量。数値は少し保持してから更新します。'],
+  rat:  ['Ratio', '圧縮の比率。'],
+  kne:  ['Knee', 'スレッショルド付近を滑らかにする幅。'],
+  atk:  ['Attack', '圧縮がかかり始めるまでの速さ。'],
+  rls:  ['Release', '圧縮が戻るまでの速さ。'],
+  mix:  ['Mix', 'バンド内のドライ／ウェットの割合。'],
+  match:['Gain match', '3 秒間の平均ゲインリダクションを測って、ゲインを 1 回だけ合わせます。もう一度押すと取り消します。'],
+  S:    ['Solo', 'このバンドだけを聴きます。'],
+  M:    ['Mute', 'このバンドを消音します。'],
+  B:    ['Bypass', 'このバンドの圧縮を止めます。'],
+  mode: ['Analyzer', 'スペクトラムの表示。IN+OUT / OUT / IN / OFF。'],
+  gin:  ['Input', '入力ゲイン。'],
+  gout: ['Output', '出力ゲイン。'],
+  gmix: ['Mix', '全体のドライ／ウェットの割合。'],
+  look: ['Lookahead', '先読み時間。レイテンシとしてホストに報告します。'],
+};
+
+// ───────────────────────────────── controls
+const ctls = [];
+function addV(cx, obj, key, sp, label, tip, dis, def) {
+  ctls.push({ kind: 'v', cx, obj, key, sp, label, tip: TIP[tip], tipKey: 'v' + cx, dis, def: def ?? sp.def,
+              r: [cx - 14, 418, 28, 202], vr: [cx - 23, 605, 46, 14] });
+}
+function addH(x0, yc, obj, key, sp, label, tip, dis, def) {
+  ctls.push({ kind: 'h', x0, yc, obj, key, sp, label, tip: TIP[tip], tipKey: 'h' + x0 + ':' + yc, dis, def: def ?? sp.def,
+              r: [x0 + 6, yc - 7, 228, 14], vr: [x0 + 184, yc - 7, 50, 14] });
+}
+bands.forEach((b, i) => {
+  const x0 = COL_L + 240 * i, dis = () => b.byp;
+  addV(x0 + 30, b, 'thr', SP.thr, 'THS', 'thr', dis);
+  addV(x0 + 75, b, 'rng', SP.rng, 'RNG', 'rng', dis);
+  addV(x0 + 120, b, 'gain', SP.gain, 'GAIN', 'gain', dis);
+  ['rat', 'kne', 'atk', 'rls', 'mix'].forEach((key, j) =>
+    addH(x0, 650 + 20 * j, b, key, SP[key], { rat: 'RAT', kne: 'KNE', atk: 'ATK', rls: 'RLS', mix: 'MIX' }[key], key, dis,
+         key === 'atk' ? ATK[i] : key === 'rls' ? RLS[i] : undefined));
+  [['S', 'solo'], ['M', 'mute'], ['B', 'byp']].forEach(([l, key], j) =>
+    ctls.push({ kind: 't', b, i, key, label: l, tx: x0 + 168 + 20 * j, tip: TIP[l], tipKey: 't' + i + l,
+                r: [x0 + 166 + 20 * j, 387, 18, 16] }));
+  ctls.push({ kind: 'match', b, i, tip: TIP.match, tipKey: 'm' + i, r: [x0 + 140, 584, 42, 16] });
+  ctls.push({ kind: 'gr', b, i, tip: TIP.gr, tipKey: 'gr' + i, r: [x0 + 190, 418, 40, 202] });
+});
+addV(80, G, 'gin', SP.gain, 'IN', 'gin', null);
+addV(1124, G, 'look', SP.look, 'LOOK', 'look', null);
+addV(1160, G, 'mix', SP.mix, 'MIX', 'gmix', null);
+addV(1196, G, 'gout', SP.gain, 'OUT', 'gout', null);
+function buildPill() { // analyzer source pill, right-aligned in the graph header (after the font loads)
+  for (let i = ctls.length - 1; i >= 0; --i) if (ctls[i].kind === 'seg') ctls.splice(i, 1);
+  const segW = MODES.map(m => Math.round(tw(m, LABEL)) + 16);
+  let x = 1090 - segW.reduce((a, b) => a + b, 0);
+  MODES.forEach((m, i) => { ctls.push({ kind: 'seg', i, label: m, tip: TIP.mode, tipKey: 'mode', r: [x, 27, segW[i], 16] }); x += segW[i]; });
+}
+
+// ───────────────────────────────── plot mapping
+const fx = f => PX0 + (PX1 - PX0) * Math.log(f / 20) / Math.log(1000);
+const xf = x => 20 * Math.pow(1000, (x - PX0) / (PX1 - PX0));
+const dy = d => PY1 - (d - DBB) / (DBT - DBB) * (PY1 - PY0);
+const yd = y => DBB + (PY1 - y) / (PY1 - PY0) * (DBT - DBB);
+const rowsFor = d => clamp(Math.floor((d - DBB) / DB_ROW + 1e-6), 0, NR);
+const bandOf = f => f < xo[0] ? 0 : f < xo[1] ? 1 : f < xo[2] ? 2 : 3;
+function bandSpan(i) { return [i === 0 ? PX0 : fx(xo[i - 1]), i === 3 ? PX1 : fx(xo[i])]; }
+
+// ───────────────────────────────── signal simulation
+const freqs = Float32Array.from({ length: NC }, (_, c) => 20 * Math.pow(1000, (c + 0.5) / NC));
+const nz = new Float32Array(NC), inDb = new Float32Array(NC), outDb = new Float32Array(NC), cutDb = new Float32Array(NC);
+let kick = 0, hat = 0, tPrev = 0;
+const meters = { in: [-60, -60], out: [-60, -60], inPk: -72, outPk: -72, inHold: 0, outHold: 0 };
+let grTick = 0;
+
+function shape(f) {
+  let d = -36 - 3.0 * Math.log2(f / 1000);
+  d += 16 * Math.exp(-Math.pow(Math.log2(f / 70) / 0.8, 2));
+  d += 5 * Math.exp(-Math.pow(Math.log2(f / 3200) / 0.7, 2));
+  if (f < 32) d -= (32 - f) * 0.9;
+  if (f > 12000) d -= (f - 12000) / 900;
+  return d;
+}
+function grOf(L, b) {
+  const o = L - b.thr, kn = b.kne, sl = 1 - 1 / b.rat;
+  let g;
+  if (kn <= 0) g = o > 0 ? sl * o : 0;
+  else if (2 * o < -kn) g = 0;
+  else if (2 * o <= kn) g = sl * (o + kn / 2) * (o + kn / 2) / (2 * kn);
+  else g = sl * o;
+  return Math.min(g, b.rng);
+}
+const dbsum = arr => { let e = 0; for (const v of arr) if (v > -200) e += Math.pow(10, v / 10); return e > 0 ? 10 * Math.log10(e) : -200; };
+
+function sim(t, dt) {
+  const beat = 0.5;
+  if (Math.floor(t / beat) !== Math.floor(tPrev / beat)) kick = 1;
+  if (Math.floor((t + beat / 2) / (beat / 2)) !== Math.floor((tPrev + beat / 2) / (beat / 2))) hat = 1;
+  tPrev = t;
+  kick *= Math.exp(-dt * 5); hat *= Math.exp(-dt * 12);
+
+  for (let c = 0; c < NC; ++c) nz[c] = nz[c] * 0.85 + (Math.random() - 0.5) * 2.6;
+  const anySolo = bands.some(b => b.solo);
+  const grMax = [0, 0, 0, 0];
+  for (let c = 0; c < NC; ++c) {
+    let sm = 0; for (let j = -3; j <= 3; ++j) sm += nz[clamp(c + j, 0, NC - 1)];
+    const f = freqs[c];
+    const L = shape(f) + G.gin + sm * 0.8 + 2 * Math.sin(t * 0.7 + c * 0.04)
+            + kick * 11 * Math.exp(-Math.pow(Math.log2(f / 70) / 1.1, 2))
+            + hat * 7 * Math.exp(-Math.pow(Math.log2(f / 7000) / 0.9, 2));
+    const bi = bandOf(f), b = bands[bi];
+    const silent = b.mute || (anySolo && !b.solo);
+    const g = b.byp ? 0 : grOf(L, b) * b.mix / 100;
+    const wet = L - g + (b.byp ? 0 : b.gain);
+    const m = G.mix / 100;
+    inDb[c] = L;
+    cutDb[c] = L - g;
+    outDb[c] = silent ? -200 : 10 * Math.log10(m * Math.pow(10, wet / 10) + (1 - m) * Math.pow(10, L / 10)) + G.gout;
+    if (g > grMax[bi]) grMax[bi] = g;
+  }
+  bands.forEach((b, i) => {
+    const rel = Math.exp(-dt * 1000 / Math.max(b.rls, 20)), atk = Math.exp(-dt * 1000 / Math.max(b.atk * 4, 10));
+    const tg = grMax[i] * 0.8;
+    b.gr = tg > b.gr ? tg + (b.gr - tg) * atk : tg + (b.gr - tg) * rel;
+    b.grPeak = Math.max(b.grPeak, b.gr);
+    if (b.learn) { b.learn.sum += b.gr; b.learn.n++; if (t - b.learn.t0 >= 3) { b.gain = clamp(Math.round(b.learn.sum / b.learn.n * 10) / 10, -24, 24); b.learn = null; } }
+  });
+  if ((grTick += dt) >= 0.5) { grTick = 0; bands.forEach(b => { b.grShow = b.grPeak; b.grPeak = 0; }); }
+
+  // stereo meters from the summed spectra
+  const li = dbsum(inDb) - 19, lo = dbsum(outDb) - 19;
+  const ball = (cur, v) => v > cur ? v : cur - dt * 26;
+  meters.in = [ball(meters.in[0], li), ball(meters.in[1], li - 0.7 + Math.random() * 0.5)];
+  meters.out = [ball(meters.out[0], lo), ball(meters.out[1], lo - 0.7 + Math.random() * 0.5)];
+  const hold = (pk, hk, v) => { if (v >= meters[pk] || (meters[hk] -= dt) <= 0) { meters[pk] = v; meters[hk] = 1.5; } };
+  hold('inPk', 'inHold', Math.max(...meters.in));
+  hold('outPk', 'outHold', Math.max(...meters.out));
+}
+
+// ───────────────────────────────── drawing
+function header(n, name, x, y, c = C.ink) {
+  T(n, x, y, NOTE, C.ink3);
+  T(name, x + 14, y, LABEL, c);
+}
+
+function drawGraph() {
+  const paths = new Map();
+  const P = col => { let p = paths.get(col); if (!p) { p = new Path2D(); paths.set(col, p); } return p; };
+  const showOut = G.mode <= 1, showIn = G.mode === 0 || G.mode === 2;
+  for (let c = 0; c < NC; ++c) {
+    const x = PX0 + c * 4;
+    const nIn = G.mode === 3 ? 0 : rowsFor(inDb[c]), nOut = showOut ? rowsFor(outDb[c]) : 0, nCut = rowsFor(cutDb[c]);
+    for (let j = 0; j < NR; ++j) {
+      let col = C.off;
+      const ramp = RAMP[Math.min(RAMP.length - 1, Math.floor(j / NR * RAMP.length * 1.15))];
+      if (j < nOut) col = ramp;
+      else if (showOut && j >= nCut && j < nIn) col = C.acc;
+      else if (j < nIn && showIn) col = G.mode === 2 ? ramp : C.ghost;
+      cellTo(P(col), x, PY0 + 4 * (NR - 1 - j));
+    }
+  }
+  for (const [col, p] of paths) { ctx.fillStyle = col; ctx.fill(p); }
+
+  // crossovers and thresholds
+  xo.forEach((f, i) => {
+    const on = isHot('xo', i);
+    lineV(fx(f), PY0, PY1, C.ink, on ? 1.2 : 0.5);
+  });
+  bands.forEach((b, i) => {
+    const [l, r] = bandSpan(i), on = isHot('thr', i);
+    lineH(l, r, dy(b.thr), b.byp ? C.dKnob : C.ink, on ? 1.2 : 0.5);
+    T('ABCD'[i], l + 3, 70, LABEL, b.byp ? C.dText : C.ink2);
+  });
+  for (let d = 0; d >= -72; d -= 12) T(String(d), 1057, dy(d), TICK, C.ink2);
+  [[50, '50'], [100, '100'], [200, '200'], [500, '500'], [1000, '1k'], [2000, '2k'], [5000, '5k'], [10000, '10k']]
+    .forEach(([f, l]) => T(l, fx(f), 352, TICK, C.ink2, 'center'));
+}
+
+function drawMeter(cx, lv, pk) {
+  const p0 = new Path2D(), pa = new Path2D(), rows = RAMP.map(() => new Path2D());
+  const ref = rowsFor(0);
+  lv.forEach((v, ch) => {
+    const x = cx - 3.5 + ch * 4, n = rowsFor(v);
+    for (let j = 0; j < NR; ++j) {
+      const y = PY0 + 4 * (NR - 1 - j);
+      if (j >= n) cellTo(p0, x, y);
+      else if (j >= ref) cellTo(pa, x, y);
+      else cellTo(rows[Math.min(RAMP.length - 1, Math.floor(j / NR * RAMP.length * 1.15))], x, y);
+    }
+  });
+  ctx.fillStyle = C.off; ctx.fill(p0);
+  rows.forEach((p, i) => { ctx.fillStyle = RAMP[i]; ctx.fill(p); });
+  ctx.fillStyle = C.acc; ctx.fill(pa);
+  lineH(cx - 3.5, cx + 3.5, dy(0), C.ink);
+  const v = Math.max(pk, -72);
+  dotNum((v > 0 ? '+' : '') + v.toFixed(1), cx, 352, pk > 0 ? C.acc : C.ink);
+}
+
+function drawV(ct) {
+  const { cx, sp } = ct, v = ct.obj[ct.key], dis = ct.dis && ct.dis();
+  const r = Math.round(sp.m.n(v) * (FAD_ROWS - 1));
+  const b0 = sp.bip != null ? Math.round(sp.m.n(sp.bip) * (FAD_ROWS - 1)) : 0;
+  const lo = Math.min(b0, r), hi = Math.max(b0, r);
+  const pOff = new Path2D(), pLit = new Path2D(), pKnob = new Path2D();
+  for (let j = 0; j < FAD_ROWS; ++j) {
+    const y = FAD_Y + 4 * (FAD_ROWS - 1 - j), p = j === r ? pKnob : (j >= lo && j <= hi ? pLit : pOff);
+    cellTo(p, cx - 3.5, y); cellTo(p, cx + 0.5, y);
+  }
+  ctx.fillStyle = C.off; ctx.fill(pOff);
+  ctx.fillStyle = dis ? C.dLit : C.lit; ctx.fill(pLit);
+  ctx.fillStyle = dis ? C.dKnob : C.ink; ctx.fill(pKnob);
+  lineH(cx - 9, cx + 9, FAD_Y + 4 * (FAD_ROWS - 1 - r) + 1.5, dis ? C.dKnob : C.ink, isDrag(ct) ? 1 : 0.5);
+  T(ct.label, cx, 425, LABEL, dis ? C.dText : C.ink, 'center');
+  T(sp.f(v), cx, 612, VAL, dis ? C.dText : C.ink, 'center');
+}
+
+function drawH(ct) {
+  const { x0, yc, sp } = ct, v = ct.obj[ct.key], dis = ct.dis && ct.dis();
+  const r = Math.round(sp.m.n(v) * (SL_CELLS - 1));
+  const pOff = new Path2D(), pLit = new Path2D(), pKnob = new Path2D();
+  for (let j = 0; j < SL_CELLS; ++j) cellTo(j === r ? pKnob : j < r ? pLit : pOff, x0 + SL_X + 4 * j, yc - 1.5);
+  ctx.fillStyle = C.off; ctx.fill(pOff);
+  ctx.fillStyle = dis ? C.dLit : C.lit; ctx.fill(pLit);
+  ctx.fillStyle = dis ? C.dKnob : C.ink; ctx.fill(pKnob);
+  lineV(x0 + SL_X + 4 * r + 1.5, yc - 5, yc + 5, dis ? C.dKnob : C.ink, isDrag(ct) ? 1 : 0.5);
+  T(ct.label, x0 + 10, yc, LABEL, dis ? C.dText : C.ink);
+  T(sp.f(v), x0 + 230, yc, VAL, dis ? C.dText : C.ink, 'right');
+}
+
+function drawBand(i) {
+  const b = bands[i], x0 = COL_L + 240 * i, dis = b.byp;
+  header('0' + (i + 3), 'BAND ' + 'ABCD'[i], x0 + 10, 395, dis ? C.dText : C.ink);
+  const lo = i === 0 ? 20 : xo[i - 1], hi = i === 3 ? 20000 : xo[i];
+  T(fq(lo) + '–' + fq(hi) + ' Hz', x0 + 70, 395, VAL, dis ? C.dText : C.ink2);
+
+  // gain reduction: dots hang from the top, 0 – 24 dB
+  const cx = x0 + 210, n = Math.round(clamp(b.gr / 24, 0, 1) * FAD_ROWS);
+  const pOff = new Path2D(), pOn = new Path2D();
+  for (let j = 0; j < FAD_ROWS; ++j) { const p = j < n ? pOn : pOff; cellTo(p, cx - 3.5, FAD_Y + 4 * j); cellTo(p, cx + 0.5, FAD_Y + 4 * j); }
+  ctx.fillStyle = C.off; ctx.fill(pOff);
+  ctx.fillStyle = dis ? C.dLit : C.acc; ctx.fill(pOn);
+  T('GR', cx, 425, LABEL, dis ? C.dText : C.ink, 'center');
+  const g = dis ? 0 : b.grShow;
+  T(g >= 0.05 ? '-' + g.toFixed(1) + ' dB' : '0.0 dB', cx, 612, VAL, dis ? C.dText : g >= 0.05 ? C.acc : C.ink3, 'center');
+}
+
+function drawLogo() {
+  const P = 4, D = 3, on = new Path2D(), acc = new Path2D();
+  let x = 30;
+  ['M', 'B', 'C', '4'].forEach((ch, n) => {
+    LOGO[ch].forEach((row, r) => [...row].forEach((bit, c) => { if (bit === '1') cellTo(n === 3 ? acc : on, x + c * P, 25.5 + r * P, D, D); }));
+    x += 5 * P;
+  });
+  ctx.fillStyle = C.ink; ctx.fill(on);
+  ctx.fillStyle = C.acc; ctx.fill(acc);
+}
+
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = C.cell; ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // rules only
+  ruleH(20, 1220, 20); ruleH(20, 1220, FRAME_B); ruleV(20, 20, FRAME_B); ruleV(1220, 20, FRAME_B);
+  ruleV(COL_L, 20, FRAME_B); ruleV(COL_R, 20, FRAME_B);
+  ruleH(20, COL_L, 50); ruleH(COL_L, COL_R, ROW_B);
+  for (let i = 1; i < 4; ++i) ruleV(COL_L + 240 * i, ROW_B, FRAME_B);
+
+  drawLogo();
+  header('01', 'INPUT', 30, 65);
+  header('02', 'SPLIT', 150, 35);
+  header('07', 'OUTPUT', 1110, 35);
+
+  drawGraph();
+  drawMeter(80, meters.in, meters.inPk);
+  drawMeter(1160, meters.out, meters.outPk);
+  for (let i = 0; i < 4; ++i) drawBand(i);
+
+  for (const ct of ctls) {
+    if (ct.kind === 'v') drawV(ct);
+    else if (ct.kind === 'h') drawH(ct);
+    else if (ct.kind === 't') {
+      const on = ct.b[ct.key], y = 392;
+      if (on) R(ct.tx, y, 6, 6, C.acc); else frame(ct.tx, y, 6, 6, C.ink3);
+      T(ct.label, ct.tx + 9, 395, LABEL, C.ink);
+    } else if (ct.kind === 'seg') {
+      const [x, y, w, h] = ct.r;
+      if (ct.i === 0) { const last = ctls.filter(c => c.kind === 'seg').pop().r; pill(x, y, last[0] + last[2] - x, h, C.off); }
+      if (G.mode === ct.i) pill(x + 1, y + 1, w - 2, h - 2, C.plot, C.rule);
+      T(ct.label, x + w / 2, y + h / 2, LABEL, G.mode === ct.i ? C.ink : C.ink2, 'center');
+    } else if (ct.kind === 'match') {
+      const [x, y, w, h] = ct.r, dis = ct.b.byp;
+      pill(x, y, w, h, C.off);
+      T('MATCH', x + w / 2, y + h / 2, LABEL, dis ? C.dText : ct.b.learn ? C.acc : C.ink, 'center');
+    }
+  }
+
+  // footer: version + stepped resize corner
+  T('V1.1.0', 20, 771, NOTE, C.ink3);
+  for (let r = 0; r < 3; ++r) for (let c = 2 - r; c < 3; ++c) R(1209 + 4 * c, 769 + 4 * r, 3, 3, C.ink3);
+
+  // bubbles (graph only)
+  const h = drag ? drag.h : hot;
+  if (h && h.kind === 'thr') bubble('ABCD'[h.i] + '  ' + fdB(bands[h.i].thr), mouse.x, dy(bands[h.i].thr) - 12);
+  else if (h && h.kind === 'xo') bubble(fHz(xo[h.i]), fx(xo[h.i]), PY0 + 10);
+  else if (h && h.kind === 'plot') bubble(fHz(xf(mouse.x)) + '  ' + num(yd(mouse.y)) + ' dB', mouse.x, mouse.y - 14);
+}
+
+// ───────────────────────────────── interaction
+let drag = null, hot = null;
+const mouse = { x: -100, y: -100 };
+const inR = (r, p) => p.x >= r[0] && p.x < r[0] + r[2] && p.y >= r[1] && p.y < r[1] + r[3];
+const isHot = (kind, i) => { const h = drag ? drag.h : hot; return h && h.kind === kind && h.i === i; };
+const isDrag = ct => drag && drag.h === ct;
+function pos(e) { const b = cv.getBoundingClientRect(); return { x: (e.clientX - b.left) / s, y: (e.clientY - b.top) / s }; }
+
+function hitAll(p) {
+  for (const ct of ctls) if (inR(ct.r, p)) return ct;
+  if (p.x >= PX0 - 3 && p.x <= PX1 + 3 && p.y >= PY0 && p.y <= PY1) {
+    for (let i = 0; i < 3; ++i) if (Math.abs(p.x - fx(xo[i])) <= 4) return { kind: 'xo', i };
+    const i = bandOf(xf(p.x));
+    if (Math.abs(p.y - dy(bands[i].thr)) <= 4) return { kind: 'thr', i };
+    return { kind: 'plot' };
+  }
+  return null;
+}
+
+cv.addEventListener('pointerdown', e => {
+  const p = pos(e), h = hitAll(p);
+  hideTip();
+  if (!h) return;
+  cv.setPointerCapture(e.pointerId);
+  if (h.kind === 'v' || h.kind === 'h') drag = { h, ax: p.x, ay: p.y, n0: h.sp.m.n(h.obj[h.key]), fine: e.shiftKey };
+  else if (h.kind === 'thr') drag = { h, off: p.y - dy(bands[h.i].thr) };
+  else if (h.kind === 'xo') drag = { h };
+  else if (h.kind === 't') h.b[h.key] = !h.b[h.key];
+  else if (h.kind === 'seg') G.mode = h.i;
+  else if (h.kind === 'match' && !h.b.byp) h.b.learn = h.b.learn ? null : { t0: performance.now() / 1000, sum: 0, n: 0 };
+});
+cv.addEventListener('pointermove', e => {
+  const p = pos(e);
+  mouse.x = p.x; mouse.y = p.y;
+  if (drag) { applyDrag(p, e.shiftKey); return; }
+  hot = hitAll(p);
+  cv.style.cursor = !hot ? 'default' : hot.kind === 'thr' ? 'ns-resize' : hot.kind === 'xo' ? 'ew-resize'
+                  : hot.kind === 'v' ? 'ns-resize' : hot.kind === 'h' ? 'ew-resize' : hot.kind === 'plot' || hot.kind === 'gr' ? 'default' : 'pointer';
+  schedTip(hot, e);
+});
+cv.addEventListener('pointerup', () => { drag = null; });
+cv.addEventListener('pointerleave', () => { if (!drag) { hot = null; hideTip(); } });
+
+function applyDrag(p, fine) {
+  const h = drag.h;
+  if (h.kind === 'v' || h.kind === 'h') {
+    if (fine !== drag.fine) { drag.n0 = h.sp.m.n(h.obj[h.key]); drag.ax = p.x; drag.ay = p.y; drag.fine = fine; }
+    const d = h.kind === 'v' ? (drag.ay - p.y) / 160 : (p.x - drag.ax) / 128;
+    h.obj[h.key] = snap(h.sp, h.sp.m.v(clamp(drag.n0 + d * (fine ? 0.2 : 1), 0, 1)), fine);
+  } else if (h.kind === 'thr') {
+    bands[h.i].thr = snap(SP.thr, yd(p.y - drag.off), fine);
+  } else if (h.kind === 'xo') {
+    let f = xf(p.x);
+    const e = Math.pow(10, Math.floor(Math.log10(f)) - (fine ? 2 : 1));
+    f = Math.round(f / e) * e;
+    const lo = h.i === 0 ? 25 : xo[h.i - 1] * 1.25, hi = h.i === 2 ? 16000 : xo[h.i + 1] / 1.25;
+    xo[h.i] = clamp(f, lo, hi);
+  }
+}
+
+cv.addEventListener('dblclick', e => {
+  const p = pos(e), h = hitAll(p);
+  if (!h) return;
+  if (h.kind === 'v' || h.kind === 'h') { if (inR(h.vr, p)) edit(h); else h.obj[h.key] = h.def; }
+  else if (h.kind === 'thr') bands[h.i].thr = SP.thr.def;
+  else if (h.kind === 'xo') xo[h.i] = XO_DEF[h.i];
+});
+
+cv.addEventListener('wheel', e => {
+  const h = hitAll(pos(e));
+  if (!h || (h.kind !== 'v' && h.kind !== 'h')) return;
+  e.preventDefault();
+  const sp = h.sp, dir = e.deltaY < 0 ? 1 : -1, v = h.obj[h.key];
+  if (sp.list && !e.shiftKey) {
+    const idx = sp.list.indexOf(snap(sp, v, false));
+    h.obj[h.key] = sp.list[clamp(idx + dir, 0, sp.list.length - 1)];
+  } else h.obj[h.key] = snap(sp, v + dir * (e.shiftKey ? sp.fine : sp.step), e.shiftKey);
+}, { passive: false });
+
+// direct entry on the value text
+const ed = document.getElementById('edit');
+function edit(h) {
+  const b = cv.getBoundingClientRect(), r = h.vr;
+  Object.assign(ed.style, { display: 'block', left: b.left + r[0] * s + 'px', top: b.top + r[1] * s + 'px',
+    width: r[2] * s + 'px', height: r[3] * s + 'px', fontSize: 9 * s + 'px' });
+  ed.value = num(h.obj[h.key]);
+  ed.focus(); ed.select();
+  const close = () => { ed.style.display = 'none'; ed.onkeydown = ed.onblur = null; };
+  ed.onkeydown = ev => {
+    if (ev.key === 'Enter') { const v = parseFloat(ed.value); if (!isNaN(v)) h.obj[h.key] = clamp(v, h.sp.min, h.sp.max); close(); }
+    else if (ev.key === 'Escape') close();
+  };
+  ed.onblur = close;
+}
+
+// tooltips: 0.5 s hover, never on the graph (bubbles live there)
+const tip = document.getElementById('tip');
+let tipTimer = null, tipKey = null, lastClient = { x: 0, y: 0 };
+function schedTip(h, e) {
+  lastClient = { x: e.clientX, y: e.clientY };
+  if (!h || !h.tip) { hideTip(); return; }
+  if (tipKey === h.tipKey) return;
+  hideTip(); tipKey = h.tipKey;
+  tipTimer = setTimeout(() => {
+    tip.querySelector('.h').textContent = h.tip[0];
+    tip.querySelector('.b').textContent = h.tip[1];
+    Object.assign(tip.style, { display: 'block', padding: `${7 * s}px ${9 * s}px`, maxWidth: 220 * s + 'px' });
+    Object.assign(tip.querySelector('.h').style, { fontSize: 8 * s + 'px', letterSpacing: 0.8 * s + 'px', marginBottom: 3 * s + 'px' });
+    tip.querySelector('.b').style.fontSize = 10.5 * s + 'px';
+    const w = tip.offsetWidth, hh = tip.offsetHeight;
+    let x = lastClient.x + 14, y = lastClient.y + 18;
+    if (x + w > innerWidth - 8) x = lastClient.x - w - 10;
+    if (y + hh > innerHeight - 8) y = lastClient.y - hh - 10;
+    tip.style.left = Math.max(8, x) + 'px'; tip.style.top = Math.max(8, y) + 'px';
+  }, 500);
+}
+function hideTip() { clearTimeout(tipTimer); tipTimer = null; tipKey = null; tip.style.display = 'none'; }
+
+// ───────────────────────────────── run
+let last = 0;
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (t - last < 33) return;
+  const dt = Math.min(0.1, (t - last) / 1000); last = t;
+  sim(t / 1000, dt);
+  draw();
+}
+addEventListener('resize', fit);
+Promise.all([document.fonts.load('300 9px "Chivo Mono"'), document.fonts.load('400 8px "Chivo Mono"')])
+  .catch(() => {}).finally(() => { fit(); buildPill(); requestAnimationFrame(loop); });
+</script>

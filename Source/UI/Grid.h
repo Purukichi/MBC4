@@ -1,35 +1,38 @@
 #pragma once
 
-/** Layout grid (base size, 8 px unit). Every position in the UI is derived from these,
-    so edges line up across the graph, the band strips and the side panel. */
+/** Layout grid (base size, 10 px module; cells are 3 x 3 px on a 4 px pitch).
+    Every position in the UI is derived from these, so edges line up across
+    the graph, the meters, the band strips and the side columns. */
 namespace Grid
 {
-    constexpr int u       = 8;
-    constexpr int baseW   = 1240, baseH = 800;
-    constexpr int margin  = 3 * u;     // window edge
-    constexpr int gutter  = 2 * u;     // between blocks
+    constexpr int baseW = 1240, baseH = 800;
 
-    constexpr int topBarH = 3 * u;
-    constexpr int segW    = 7 * u;     // analyzer segment width
-    constexpr int sideW   = 15 * u;    // side panel
-    constexpr int graphH  = 39 * u;
+    // outer frame and columns
+    constexpr int frameL = 20, frameT = 20, frameR = 1220, frameB = 760;
+    constexpr int colL = 140, colR = 1100;           // input | main | output
+    constexpr int logoB = 50;                         // logo cell bottom (input column)
+    constexpr int rowB = 380;                         // graph | band strips
+    constexpr int stripW = 240;
 
-    // graph insets around the plot: tag row above, frequency labels below, dB labels right
-    constexpr int plotTop = 4 * u, plotBottom = 3 * u, plotRight = 5 * u;
+    // cells
+    constexpr float pitch = 4.0f, cell = 3.0f;
 
-    // band strip
-    constexpr int pad      = 2 * u;    // inner padding of strips / side panel
-    constexpr int headerH  = 3 * u;
-    constexpr int knobTop  = 7 * u;    // first knob row, from the strip top
-    constexpr int cellW    = 7 * u;
-    constexpr int rowH     = 13 * u;
-    constexpr int knobD    = 5 * u;
-    constexpr int labelGap = u;
-    constexpr int labelH   = 2 * u;
-    constexpr int knobBlock = knobD + labelGap + labelH;      // disc + label
-    constexpr int knobInset = (rowH - knobBlock) / 2;         // block offset inside its row
+    // graph plot (window coordinates): 225 x 65 cells, +6 .. -72 dB
+    constexpr int plotL = 150, plotR = 1050, plotT = 80, plotB = 340;
+    constexpr int plotCols = 225, plotRows = 65;
+    constexpr float maxDb = 6.0f, minDb = -72.0f;
+    constexpr float dbPerRow = (maxDb - minDb) / (float) plotRows;
+    constexpr int readoutTop = 352;                   // meter peak readouts / frequency labels
 
-    constexpr int meterW   = 3;
-    constexpr int buttonD  = 3 * u;
-    constexpr int smallButtonD = 20;
+    // vertical faders (window y): label row, 40 cells, value row
+    constexpr int faderTop = 418, faderH = 202;
+    constexpr int faderLabelY = 425, faderCellsY = 440, faderValueY = 612;
+    constexpr int faderRows = 40;
+    constexpr int faderW = 44, faderGrab = 28;        // painted width / clickable width
+
+    // horizontal sliders (window y of the first row centre), from the strip's left edge
+    constexpr int sliderY0 = 650, sliderPitch = 20, sliderCellsX = 46, sliderCells = 32;
+
+    // band strip x offsets
+    constexpr int thsX = 30, rngX = 75, gainX = 120, grX = 210;
 }

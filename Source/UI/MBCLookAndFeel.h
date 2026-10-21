@@ -2,36 +2,87 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-/** Quiet monochrome: a slightly grey base, near-black ink for lines and text,
-    hairlines derived from the ink. */
+/** PC1 style: one background colour, 0.2 px rules, near-black ink in three steps,
+    square cells for every mark, signal orange as the only accent (on / active / cut). */
 namespace Palette
 {
-    const juce::Colour bg        { 0xffecebe9 };   // window base (not pure white)
-    const juce::Colour panel     { 0xfff3f3f1 };   // strips / side panel
-    const juce::Colour panelHi   { 0xfff8f8f7 };   // selected strip
-    const juce::Colour plot      { 0xfff6f6f4 };   // graph area
+    const juce::Colour cell    { 0xffe8e9e5 };   // the one background
+    const juce::Colour rule    { 0xffc3c4bf };   // 0.2 px rules
+    const juce::Colour ink     { 0xff111210 };   // text, fader caps, reference lines
+    const juce::Colour ink2    { 0xff575854 };   // secondary text, scale numbers
+    const juce::Colour ink3    { 0xff8f908b };   // notes, off toggles
+    const juce::Colour off     { 0xffdcddd8 };   // unlit cells
+    const juce::Colour lit     { 0xffb3b4af };   // lit cells (fader amounts)
+    const juce::Colour plot    { 0xfff4f4f1 };   // selected segment, text on dark
+    const juce::Colour accent  { 0xffff4d0f };   // signal orange
+    const juce::Colour ghost   { 0xffd3d4cf };   // input spectrum behind the output
 
-    const juce::Colour text      { 0xff2b2b2a };   // ink (not pure black)
-    const juce::Colour line      = text.withAlpha (0.12f);
-    const juce::Colour lineHi    = text.withAlpha (0.28f);
-    const juce::Colour soft      = text.withAlpha (0.50f);   // axis labels, secondary marks
+    // disabled (bypassed band)
+    const juce::Colour dLit    { 0xffcbccc7 };
+    const juce::Colour dKnob   { 0xffa8a9a4 };
+    const juce::Colour dText   { 0xffb0b1ac };
 
-    const juce::Colour knob      { 0xff4a4947 };   // knob discs: a softer, greyer black
-    const juce::Colour accent    { 0xff39ff14 };   // the one accent (fluorescent green): knob pointers
-    const juce::Colour white     { 0xffffffff };
+    /** data intensity, weak -> strong */
+    const std::array<juce::Colour, 6> ramp { juce::Colour (0xffc7c8c3), juce::Colour (0xffb9bab5), juce::Colour (0xffa6a7a2),
+                                             juce::Colour (0xff8f908b), juce::Colour (0xff5c5d59), juce::Colour (0xff2a2b29) };
 
-    constexpr float hair = 0.45f;                  // stroke width of hairlines
-    constexpr float radius = 6.0f;                 // corner radius of every block
-
-    /** soft drop shadow used instead of borders around blocks */
-    inline juce::DropShadow blockShadow() { return { juce::Colour (0x0f000000), 18, { 0, 4 } }; }
-    inline juce::DropShadow blockContact() { return { juce::Colour (0x0a000000), 3, { 0, 1 } }; }
+    /** ramp colour for row j of n (darker towards the top) */
+    inline juce::Colour rampAt (int j, int n)
+    {
+        return ramp[(size_t) juce::jlimit (0, (int) ramp.size() - 1, (int) ((float) j / (float) n * (float) ramp.size() * 1.15f))];
+    }
 }
 
 namespace Fonts
 {
-    /** the one UI typeface and weight (standard Windows sans, regular) */
-    juce::Font ui (float height);
+    /** the four type roles (Chivo Mono, embedded) */
+    enum class Role { label, value, note, tick };
+
+    juce::Font mono (float size, bool light, float trackingPx = 0.0f);
+    juce::Font of (Role);
+    juce::Font japanese (float size);
+}
+
+namespace Draw
+{
+    using Role = Fonts::Role;
+
+    /** device-pixel snapping inside a component of the scaled main view */
+    struct Px
+    {
+        Px (juce::Graphics&, const juce::Component&);
+
+        float snapX (float x) const noexcept { return std::round ((x + ox) * k) / k - ox; }
+        float snapY (float y) const noexcept { return std::round ((y + oy) * k) / k - oy; }
+        juce::Rectangle<float> rect (float x, float y, float w, float h) const noexcept;
+        juce::Rectangle<float> cell (float x, float y) const noexcept;
+        float dev (float t) const noexcept { return juce::jmax (1.0f, std::round (t * k)) / k; }   // >= 1 device px
+
+        float k = 1.0f, ox = 0.0f, oy = 0.0f;
+    };
+
+    /** y is the text's centre line */
+    void text (juce::Graphics&, const juce::String&, float x, float y, Role, juce::Colour,
+               juce::Justification = juce::Justification::left);
+    float width (const juce::String&, Role);
+
+    void ruleH (juce::Graphics&, float x1, float x2, float y);
+    void ruleV (juce::Graphics&, float x, float y1, float y2);
+    void lineH (juce::Graphics&, const Px&, float x1, float x2, float y, juce::Colour, float t = 0.5f);
+    void lineV (juce::Graphics&, const Px&, float x, float y1, float y2, juce::Colour, float t = 0.5f);
+    void outline (juce::Graphics&, const Px&, juce::Rectangle<float>, juce::Colour);
+
+    void pill (juce::Graphics&, juce::Rectangle<float>, juce::Colour fill, juce::Colour stroke = {});
+    void bubble (juce::Graphics&, const juce::String&, float cx, float cy, float minX, float maxX);
+    void sectionHeader (juce::Graphics&, const juce::String& number, const juce::String& name, float x, float y,
+                        juce::Colour = Palette::ink);
+
+    /** 5 x 7 dot-matrix number, unlit dots drawn faintly */
+    void dotNumber (juce::Graphics&, const Px&, const juce::String&, float cx, float top, juce::Colour);
+    /** 4 x 5 dot logo, the last letter in the accent */
+    void logo (juce::Graphics&, const Px&, float x, float y);
+    /** n x m cells on the 4 px pitch, one colour */
+    void cells (juce::Graphics&, const Px&, float x, float y, int cols, int rows, juce::Colour);
 }
 
 //==============================================================================
@@ -40,20 +91,23 @@ class MBCLookAndFeel : public juce::LookAndFeel_V4
 public:
     MBCLookAndFeel();
 
-    void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos,
-                           float startAngle, float endAngle, juce::Slider&) override;
+    /** tooltips live in the unscaled editor: they follow the UI scale through this */
+    void setUiScale (float s) noexcept { uiScale = s; }
 
-    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&,
-                               bool highlighted, bool down) override;
-    void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
-
-    juce::Font getPopupMenuFont() override { return Fonts::ui (14.0f); }
+    juce::Font getPopupMenuFont() override { return Fonts::mono (13.0f, true); }
     void drawPopupMenuBackground (juce::Graphics&, int w, int h) override;
 
+    /** tooltip text: "HEADING\nbody" */
     void drawTooltip (juce::Graphics&, const juce::String& text, int w, int h) override;
     juce::Rectangle<int> getTooltipBounds (const juce::String& text, juce::Point<int> pos, juce::Rectangle<int> parent) override;
 
-    void drawLabel (juce::Graphics&, juce::Label&) override;
+    /** the resize corner: a staircase of cells */
+    void drawCornerResizer (juce::Graphics&, int w, int h, bool isMouseOver, bool isMouseDragging) override;
+
     void fillTextEditorBackground (juce::Graphics&, int w, int h, juce::TextEditor&) override;
     void drawTextEditorOutline (juce::Graphics&, int w, int h, juce::TextEditor&) override;
+
+private:
+    float uiScale = 1.0f;
+    juce::TextLayout tooltipLayout (const juce::String&, float maxWidth) const;
 };

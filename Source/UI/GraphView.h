@@ -3,16 +3,17 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include "PluginProcessor.h"
+#include "Controls.h"
 
 //==============================================================================
 /**
-    Main graph: input/output spectrum, band regions, draggable crossovers and
-    per-band threshold / gain-reduction display.
+    "02 SPLIT": the spectrum drawn with cells, crossovers and per-band thresholds.
+    Output spectrum in grey steps, the part each band's compressor removes in orange,
+    the input behind it in a pale grey.
 
-    Mouse:  drag crossover line  -> move split frequency (Alt+click: default)
-            dbl-click freq tag   -> type a frequency
-            drag inside a band   -> threshold   (Ctrl / Shift: fine)
-            double-click         -> reset (crossover line / threshold)
+    Mouse:  drag a crossover line  -> split frequency (Shift / Ctrl: fine)
+            drag inside a band     -> its threshold, 1 dB steps (Shift / Ctrl: 0.1 dB)
+            double-click           -> default (crossover / threshold)
 */
 class GraphView : public juce::Component
 {
@@ -24,15 +25,9 @@ public:
     /** Called from the editor timer (~30 Hz). */
     void updateFrame();
 
-    void setSelectedBand (int b)            { if (selected != b) { selected = b; repaint(); } }
-    void setAnalyzerMode (AnalyzerMode m)   { mode = m; repaint(); }
-    AnalyzerMode getAnalyzerMode() const    { return mode; }
-
-    std::function<void (int)> onBandSelected;
-
-    /** plot rectangle and dB scale, so the side meters can share the same vertical grid */
-    juce::Rectangle<float> getPlotArea() const noexcept { return plot; }
-    static constexpr float minDb = -72.0f, maxDb = 6.0f;
+    void setAnalyzerMode (AnalyzerMode m);
+    AnalyzerMode getAnalyzerMode() const noexcept { return mode; }
+    std::function<void (AnalyzerMode)> onModeChanged;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -47,69 +42,63 @@ public:
 private:
     static constexpr int fftOrder = 11;
     static constexpr int fftSize  = 1 << fftOrder;
-    static constexpr float minHz = 20.0f,  maxHz = 20000.0f;
+    static constexpr float minHz = 20.0f, maxHz = 20000.0f;
+    static constexpr int numCols = 225, numRows = 65;
 
     struct Spectrum
     {
         std::array<float, fftSize> ring {};
         int writePos = 0;
         int newSamples = 0;
-        std::vector<float> display;   // per plot point, dB
-        juce::Path path, fill;
+        std::array<float, numCols> display {};   // per cell column, dB
     };
 
-    // geometry
+    // geometry (local coordinates)
+    juce::Rectangle<float> plot;
     float freqToX (float f) const noexcept;
     float xToFreq (float x) const noexcept;
     float dbToY (float db) const noexcept;
+    float yToDb (float y) const noexcept;
     float crossoverHz (int i) const;
     float bandLeftX (int b) const;
     float bandRightX (int b) const;
     int   bandAt (float x) const;
-    int   crossoverAt (juce::Point<float> p) const;
-    juce::Rectangle<float> tagBounds (int i) const;
+    int   crossoverAt (juce::Point<float>) const;
+    bool  nearThreshold (juce::Point<float>, int band) const;
 
     void pullAndAnalyse (AnalyzerFifo&, Spectrum&);
-    void buildPath (Spectrum&);
+    void drainFifo (AnalyzerFifo&);
+    void paintCells (juce::Graphics&);
     void setParam (juce::RangedAudioParameter*, float value);
-    void editCrossover (int i);
-    void commitCrossoverEdit();
 
     MBC4Processor& proc;
+    SegmentPill modePill { { "IN+OUT", "OUT", "IN", "OFF" } };
 
     juce::RangedAudioParameter* xParam[3] {};
     juce::RangedAudioParameter* threshP[MBC4Processor::numBands] {};
-    juce::RangedAudioParameter* ratioP[MBC4Processor::numBands] {};
-    juce::RangedAudioParameter* soloP[MBC4Processor::numBands] {};
-    juce::RangedAudioParameter* muteP[MBC4Processor::numBands] {};
     juce::RangedAudioParameter* bypassP[MBC4Processor::numBands] {};
 
     juce::dsp::FFT fft { fftOrder };
     juce::dsp::WindowingFunction<float> window { (size_t) fftSize, juce::dsp::WindowingFunction<float>::hann, false };
     std::vector<float> fftBuf, scratch;
-    std::vector<float> pointHz;           // centre frequency of each plot point
-    std::vector<float> pointX;
+    std::array<float, numCols> colHz {}, frame {};
     Spectrum pre, post;
-    std::vector<float> frame;             // one analysis frame before smoothing
 
-    std::array<float, MBC4Processor::numBands> grDisp {}, lvlDisp {}, lvlHold {};
-    std::array<int, MBC4Processor::numBands> lvlHoldTime {};
-
-    juce::Rectangle<float> plot;
+    std::array<float, MBC4Processor::numBands> grDisp {};
 
     AnalyzerMode mode = AnalyzerMode::both;
-    int selected = 0;
-    int hoverBand = -1, hoverX = -1;
+
+    // hover / drag
+    enum class Hot { none, plot, crossover, threshold };
+    Hot hot = Hot::none;
+    int hotIndex = -1;
+    juce::Point<float> mouse;
 
     enum class Drag { none, crossover, threshold };
     Drag drag = Drag::none;
     int dragIndex = -1;
-    float dragStartValue = 0.0f;
-    float lastDragY = 0.0f;
+    float dragRaw = 0.0f, lastDragY = 0.0f;
     juce::RangedAudioParameter* dragParam = nullptr;
-
-    juce::TextEditor freqEditor;
-    int editingIndex = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GraphView)
 };

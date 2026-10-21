@@ -2,166 +2,68 @@
 #include "MBCLookAndFeel.h"
 #include "Grid.h"
 
-//==============================================================================
-void FineSlider::mouseDown (const juce::MouseEvent& e)
+juce::String tooltipText (const char* heading, const char* body)
 {
-    altClick = e.mods.isAltDown();
-    if (altClick)
-    {
-        if (onAltClick)
-            onAltClick();
-        return;
-    }
-
-    Slider::mouseDown (e);   // gesture start
-    lastPos = e.position;
-    dragProportion = valueToProportionOfLength (getValue());
+    return juce::String (heading) + "\n" + juce::String::fromUTF8 (body);
 }
 
-void FineSlider::mouseDrag (const juce::MouseEvent& e)
-{
-    if (altClick || ! isEnabled() || e.mods.isPopupMenu())
-        return;
-
-    const float delta = (e.position.x - lastPos.x) + (lastPos.y - e.position.y);
-    lastPos = e.position;
-
-    const bool fine = e.mods.isCtrlDown() || e.mods.isCommandDown() || e.mods.isShiftDown();
-    const double pixelsForFullRange = fine ? 230.0 * 6.0 : 230.0;
-
-    // the drag position itself stays continuous; only plain drags snap to the detents
-    dragProportion = juce::jlimit (0.0, 1.0, dragProportion + delta / pixelsForFullRange);
-    const double target = fine ? dragProportion
-                               : std::round (dragProportion * detents) / (double) detents;
-    setValue (proportionOfLengthToValue (target), juce::sendNotificationSync);
-}
-
-void FineSlider::mouseUp (const juce::MouseEvent& e)
-{
-    if (! altClick)
-        Slider::mouseUp (e);   // gesture end
-    altClick = false;
-}
-
-void FineSlider::mouseDoubleClick (const juce::MouseEvent&)
-{
-    if (onDoubleClick)
-        onDoubleClick();
-}
-
-//==============================================================================
-Knob::Knob (juce::AudioProcessorValueTreeState& state, const juce::String& paramId, const juce::String& n)
-    : name (n)
-{
-    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
-    slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-    slider.setSliderSnapsToMousePosition (false);
-    addAndMakeVisible (slider);
-
-    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (state, paramId, slider);
-
-    auto* param = state.getParameter (paramId);
-    slider.onAltClick = [this, param]
-    {
-        if (param != nullptr)
-            slider.setValue (param->convertFrom0to1 (param->getDefaultValue()), juce::sendNotificationSync);
-    };
-    slider.onDoubleClick = [this]
-    {
-        value.setVisible (true);
-        value.showEditor();
-    };
-
-    value.setJustificationType (juce::Justification::centred);
-    value.setFont (Fonts::ui (12.0f));
-    value.setColour (juce::Label::textColourId, Palette::text);
-    value.onTextChange = [this] { slider.setValue (slider.getValueFromText (value.getText()), juce::sendNotificationSync); refreshText(); };
-    value.onEditorHide = [this] { updateHover(); };
-    addChildComponent (value);
-
-    slider.onValueChange = [this] { refreshText(); };
-    slider.addMouseListener (this, false);
-    refreshText();
-}
-
-Knob::~Knob()
-{
-    slider.removeMouseListener (this);
-}
-
-void Knob::refreshText()
-{
-    value.setText (slider.getTextFromValue (slider.getValue()).toLowerCase(), juce::dontSendNotification);
-}
-
-void Knob::updateHover()
-{
-    const bool show = slider.isMouseOver (true) || slider.isMouseButtonDown() || value.isBeingEdited();
-    if (show != value.isVisible())
-    {
-        value.setVisible (show);
-        repaint();
-    }
-}
-
-void Knob::paint (juce::Graphics& g)
-{
-    if (! value.isVisible())
-    {
-        g.setColour (Palette::text);
-        g.setFont (Fonts::ui (12.0f));
-        g.drawText (name, value.getBounds(), juce::Justification::centred, false);
-    }
-}
-
-void Knob::resized()
-{
-    // disc and its label as one block on the grid, centred in the cell
-    const auto r = getLocalBounds();
-    const int d = juce::jmin (maxDiameter, r.getWidth(), r.getHeight() - Grid::labelH - Grid::labelGap);
-    const int top = r.getY() + (r.getHeight() - (d + Grid::labelGap + Grid::labelH)) / 2;
-
-    slider.setBounds (r.getCentreX() - d / 2, top, d, d);
-    value.setBounds (r.getX(), top + d + Grid::labelGap, r.getWidth(), Grid::labelH);
-}
-
-//==============================================================================
 namespace
 {
-    constexpr float meterRange = 24.0f;
+    constexpr float meterRange = 24.0f;                 // GR meter: 0 .. 24 dB over 40 cells
+    constexpr int readoutHoldFrames = 15;               // held GR value: refreshed every 0.5 s
 
-    juce::String freqLabel (float f)
+    // strip-local geometry (the strip starts at window y = Grid::rowB)
+    constexpr float headerY = 15.0f, rangeX = 70.0f;
+    constexpr int   faderY = Grid::faderTop - Grid::rowB;
+    constexpr float grCellsY = (float) (Grid::faderCellsY - Grid::rowB);
+    constexpr float grLabelY = (float) (Grid::faderLabelY - Grid::rowB);
+    constexpr float grValueY = (float) (Grid::faderValueY - Grid::rowB);
+
+    juce::String shortFreq (float f)
     {
         return f >= 1000.0f ? juce::String (f / 1000.0f, f >= 10000.0f ? 1 : 2) + "k" : juce::String (juce::roundToInt (f));
     }
+
+    const juce::String dash = juce::String::fromUTF8 ("\xe2\x80\x93");
+
+    Steps dbSteps()   { return { 1.0f, 0.1f, {} }; }
+    Steps ratioSteps(){ return { 1.0f, 0.1f, { 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 10.0f, 20.0f } }; }
+    Steps atkSteps()  { return { 1.0f, 0.1f, { 0.1f, 0.3f, 1.0f, 2.0f, 3.0f, 5.0f, 8.0f, 10.0f, 15.0f, 20.0f, 25.0f, 30.0f, 50.0f, 80.0f, 100.0f, 150.0f, 200.0f, 300.0f } }; }
+    Steps rlsSteps()  { return { 1.0f, 1.0f, { 5.0f, 10.0f, 20.0f, 30.0f, 50.0f, 80.0f, 120.0f, 180.0f, 250.0f, 350.0f, 500.0f, 750.0f, 1000.0f, 1500.0f, 2000.0f, 3000.0f } }; }
+    Steps mixSteps()  { return { 5.0f, 1.0f, {} }; }
 }
 
 BandStrip::BandStrip (MBC4Processor& p, int b)
     : proc (p), band (b),
-      thresh  (p.apvts, MBC4Processor::bandParamId (b, "thresh"),  "ths"),
-      ratio   (p.apvts, MBC4Processor::bandParamId (b, "ratio"),   "rat"),
-      knee    (p.apvts, MBC4Processor::bandParamId (b, "knee"),    "kne"),
-      attack  (p.apvts, MBC4Processor::bandParamId (b, "attack"),  "atk"),
-      release (p.apvts, MBC4Processor::bandParamId (b, "release"), "rls"),
-      range   (p.apvts, MBC4Processor::bandParamId (b, "range"),   "rng"),
-      mix     (p.apvts, MBC4Processor::bandParamId (b, "mix"),     "mix"),
-      gain    (p.apvts, MBC4Processor::bandParamId (b, "gain"),    "gain")
+      thresh  (p.apvts, MBC4Processor::bandParamId (b, "thresh"),  "THS",  CellFader::Orientation::vertical,   dbSteps(),    Format::dB),
+      range   (p.apvts, MBC4Processor::bandParamId (b, "range"),   "RNG",  CellFader::Orientation::vertical,   dbSteps(),    Format::dB),
+      gain    (p.apvts, MBC4Processor::bandParamId (b, "gain"),    "GAIN", CellFader::Orientation::vertical,   dbSteps(),    Format::dB),
+      ratio   (p.apvts, MBC4Processor::bandParamId (b, "ratio"),   "RAT",  CellFader::Orientation::horizontal, ratioSteps(), Format::ratio),
+      knee    (p.apvts, MBC4Processor::bandParamId (b, "knee"),    "KNE",  CellFader::Orientation::horizontal, dbSteps(),    Format::dB),
+      attack  (p.apvts, MBC4Processor::bandParamId (b, "attack"),  "ATK",  CellFader::Orientation::horizontal, atkSteps(),   Format::ms),
+      release (p.apvts, MBC4Processor::bandParamId (b, "release"), "RLS",  CellFader::Orientation::horizontal, rlsSteps(),   Format::ms),
+      mix     (p.apvts, MBC4Processor::bandParamId (b, "mix"),     "MIX",  CellFader::Orientation::horizontal, mixSteps(),   Format::percent)
 {
-    for (auto* k : knobs())
+    thresh.setTooltip  (tooltipText ("Threshold", "この値を超えた分を圧縮します。グラフの中を上下にドラッグしても変えられます。"));
+    range.setTooltip   (tooltipText ("Range", "ゲインリダクションの上限です。"));
+    gain.setTooltip    (tooltipText ("Gain", "バンドの出力ゲイン（メイクアップ）。"));
+    ratio.setTooltip   (tooltipText ("Ratio", "圧縮の比率。"));
+    knee.setTooltip    (tooltipText ("Knee", "スレッショルド付近を滑らかにする幅。"));
+    attack.setTooltip  (tooltipText ("Attack", "圧縮がかかり始めるまでの速さ。"));
+    release.setTooltip (tooltipText ("Release", "圧縮が戻るまでの速さ。"));
+    mix.setTooltip     (tooltipText ("Mix", "バンド内のドライ／ウェットの割合。"));
+
+    for (auto* f : { &thresh, &range, &gain, &ratio, &knee, &attack, &release, &mix })
     {
-        k->setMaxDiameter (Grid::knobD);
-        addAndMakeVisible (*k);
+        f->isDimmed = [this] { return isBypassed(); };
+        addAndMakeVisible (*f);
     }
 
-    solo.setTooltip ("solo");
-    mute.setTooltip ("mute");
-    bypass.setTooltip ("bypass dynamics");
+    solo.setTooltip   (tooltipText ("Solo", "このバンドだけを聴きます。"));
+    mute.setTooltip   (tooltipText ("Mute", "このバンドを消音します。"));
+    bypass.setTooltip (tooltipText ("Bypass", "このバンドの圧縮を止めます。"));
     for (auto* btn : { &solo, &mute, &bypass })
-    {
-        btn->setClickingTogglesState (true);
         addAndMakeVisible (*btn);
-    }
 
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
     soloAtt   = std::make_unique<BA> (p.apvts, MBC4Processor::bandParamId (b, "solo"), solo);
@@ -169,34 +71,57 @@ BandStrip::BandStrip (MBC4Processor& p, int b)
     bypassAtt = std::make_unique<BA> (p.apvts, MBC4Processor::bandParamId (b, "bypass"), bypass);
 
     // gain match: learn the average gain reduction once and write the compensation into gain
-    learn.setTooltip ("gain match: measures the average gain reduction over 3 s and sets gain once. click again to cancel.");
+    learn.setTooltip (tooltipText ("Gain match", "3 秒間の平均ゲインリダクションを測って、ゲインを 1 回だけ合わせます。もう一度押すと取り消します。"));
+    learn.isDimmed = [this] { return isBypassed(); };
     learn.onClick = [this] { toggleLearn(); };
     addAndMakeVisible (learn);
 
-    // band edges: the low edge is crossover b-1, the high edge crossover b
-    for (auto* l : { &loFreq, &hiFreq })
-    {
-        l->setFont (Fonts::ui (12.0f));
-        l->setColour (juce::Label::textColourId, Palette::text);
-        l->setJustificationType (juce::Justification::centredLeft);
-        addAndMakeVisible (*l);
-    }
+    freqEditor.setFont (Fonts::of (Fonts::Role::value));
+    freqEditor.setJustification (juce::Justification::centredLeft);
+    freqEditor.setIndents (2, 0);
+    freqEditor.setBorder ({});
+    freqEditor.setInputRestrictions (10, "0123456789.kKhHzZ ");
+    freqEditor.onReturnKey = [this] { commitCrossover(); };
+    freqEditor.onEscapeKey = [this] { editingCrossover = -1; freqEditor.setVisible (false); repaint(); };
+    freqEditor.onFocusLost = [this] { editingCrossover = -1; freqEditor.setVisible (false); repaint(); };
+    addChildComponent (freqEditor);
 
-    if (band > 0)
-    {
-        loFreq.setEditable (false, true, false);
-        loFreq.onTextChange = [this] { setCrossoverFromText (band - 1, loFreq.getText()); };
-    }
-    if (band < 3)
-    {
-        hiFreq.setEditable (false, true, false);
-        hiFreq.onTextChange = [this] { setCrossoverFromText (band, hiFreq.getText()); };
-    }
+    lastBypass = isBypassed();
+}
+
+//==============================================================================
+bool BandStrip::isBypassed() const
+{
+    return proc.apvts.getRawParameterValue (MBC4Processor::bandParamId (band, "bypass"))->load() > 0.5f;
+}
+
+float BandStrip::edgeHz (int crossover) const
+{
+    if (crossover < 0) return 20.0f;
+    if (crossover > 2) return 20000.0f;
+    return proc.apvts.getRawParameterValue (MBC4Processor::xoverParamId (crossover))->load();
+}
+
+juce::String BandStrip::rangeLo() const { return shortFreq (edgeHz (band - 1)); }
+juce::String BandStrip::rangeHi() const { return shortFreq (edgeHz (band)); }
+
+juce::Rectangle<float> BandStrip::loTextArea() const
+{
+    return { rangeX - 2.0f, headerY - 7.0f, Draw::width (rangeLo(), Fonts::Role::value) + 4.0f, 14.0f };
+}
+
+juce::Rectangle<float> BandStrip::hiTextArea() const
+{
+    const float x = rangeX + Draw::width (rangeLo() + dash, Fonts::Role::value);
+    return { x - 2.0f, headerY - 7.0f, Draw::width (rangeHi(), Fonts::Role::value) + 4.0f, 14.0f };
 }
 
 //==============================================================================
 void BandStrip::toggleLearn()
 {
+    if (isBypassed())
+        return;
+
     if (proc.engine.isLearning (band))
         proc.engine.stopLearning (band);
     else
@@ -210,12 +135,10 @@ void BandStrip::updateLearn()
     if (! proc.engine.isLearning (band))
     {
         learn.setToggleState (false, juce::dontSendNotification);
-        learn.setButtonText ("match");
         return;
     }
 
-    const double secs = proc.engine.learnedSeconds (band);
-    if (secs >= learnSeconds)
+    if (proc.engine.learnedSeconds (band) >= learnSeconds)
     {
         // done: store the compensation once; it does not move afterwards
         proc.engine.stopLearning (band);
@@ -227,171 +150,136 @@ void BandStrip::updateLearn()
             p->endChangeGesture();
         }
         learn.setToggleState (false, juce::dontSendNotification);
-        learn.setButtonText ("match");
         return;
     }
 
     learn.setToggleState (true, juce::dontSendNotification);
-    learn.setButtonText (juce::String (juce::roundToInt (100.0 * secs / learnSeconds)) + "%");
 }
 
-void BandStrip::setCrossoverFromText (int index, const juce::String& text)
+void BandStrip::editCrossover (int index, juce::Rectangle<float> area)
 {
+    editingCrossover = index;
+    freqEditor.setBounds (area.withWidth (juce::jmax (area.getWidth(), 44.0f)).toNearestInt());
+    freqEditor.setText (shortFreq (edgeHz (index)), false);
+    freqEditor.setVisible (true);
+    freqEditor.grabKeyboardFocus();
+    freqEditor.selectAll();
+    repaint();
+}
+
+void BandStrip::commitCrossover()
+{
+    const int index = editingCrossover;
+    editingCrossover = -1;
+    freqEditor.setVisible (false);
+
+    const auto text = freqEditor.getText();
+    if (index < 0 || index > 2 || text.trim().isEmpty())
+        return;
+
     auto* p = proc.apvts.getParameter (MBC4Processor::xoverParamId (index));
-    auto hz = [this] (int i) { return proc.apvts.getRawParameterValue (MBC4Processor::xoverParamId (i))->load(); };
+    const float lo = index > 0 ? edgeHz (index - 1) * 1.19f : 20.0f;
+    const float hi = index < 2 ? edgeHz (index + 1) / 1.19f : 20000.0f;
+    const float f  = juce::jlimit (lo, hi, p->convertFrom0to1 (p->getValueForText (text)));
+    p->beginChangeGesture();
+    p->setValueNotifyingHost (p->convertTo0to1 (f));
+    p->endChangeGesture();
 
-    if (text.trim().isNotEmpty())
-    {
-        const float lo = index > 0 ? hz (index - 1) * 1.19f : 20.0f;
-        const float hi = index < 2 ? hz (index + 1) / 1.19f : 20000.0f;
-        const float f  = juce::jlimit (lo, hi, p->convertFrom0to1 (p->getValueForText (text)));
-        p->beginChangeGesture();
-        p->setValueNotifyingHost (p->convertTo0to1 (f));
-        p->endChangeGesture();
-    }
-
-    lastLo = lastHi = -1.0f;   // force the labels to refresh
+    lastLo = lastHi = -1.0f;   // refresh the header
+    repaint();
 }
 
-void BandStrip::layoutFreqRow()
+void BandStrip::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    // labels hug their text so the row reads "120 - 1.00k hz"
-    auto width = [] (const juce::Label& l)
-    {
-        juce::GlyphArrangement ga;
-        ga.addLineOfText (l.getFont(), l.getText(), 0.0f, 0.0f);
-        return juce::roundToInt (ga.getBoundingBox (0, -1, true).getWidth()) + 6;
-    };
-
-    auto fr = freqRow;
-    loFreq.setBounds (fr.removeFromLeft (width (loFreq)));
-    fr.removeFromLeft (12);
-    hiFreq.setBounds (fr.removeFromLeft (width (hiFreq)));
-}
-
-void BandStrip::setSelected (bool s)
-{
-    if (selected != s)
-    {
-        selected = s;
-        repaint();
-    }
-}
-
-void BandStrip::mouseDown (const juce::MouseEvent&)
-{
-    if (onSelect)
-        onSelect (band);
+    // band edges in the header: the low edge is crossover band-1, the high edge crossover band
+    if (band > 0 && loTextArea().contains (e.position))
+        editCrossover (band - 1, loTextArea());
+    else if (band < 3 && hiTextArea().contains (e.position))
+        editCrossover (band, hiTextArea());
 }
 
 void BandStrip::updateMeter()
 {
-    const float gr = juce::jmax (-meterRange, proc.engine.getGainReductionDb (band));
+    const float gr = isBypassed() ? 0.0f : juce::jmin (meterRange, -proc.engine.getGainReductionDb (band));   // positive dB
+    const float prevShown = grShown, prevReadout = grReadout;
+    grShown = gr > grShown ? gr : grShown + (gr - grShown) * 0.25f;
 
-    const float prevGr = grShown, prevPeak = grPeak;
-    grShown = gr < grShown ? gr : grShown + (gr - grShown) * 0.25f;
-
-    // held value: stays 1.5 s, then falls slowly so it can be read
-    if (gr <= grPeak) { grPeak = gr; peakHold = 45; }
-    else if (--peakHold < 0) grPeak = juce::jmin (0.0f, grPeak + 0.15f);
-
-    if (std::abs (prevGr - grShown) > 0.01f || std::abs (prevPeak - grPeak) > 0.01f)
-        repaint (meterArea.expanded (48, 20));
+    // held value: the peak of each half second, so it can be read
+    grWindowPeak = juce::jmax (grWindowPeak, gr);
+    if (++readoutFrames >= readoutHoldFrames)
+    {
+        grReadout = grWindowPeak;
+        grWindowPeak = 0.0f;
+        readoutFrames = 0;
+    }
 
     if (proc.engine.isLearning (band) || learn.getToggleState())
         updateLearn();
 
-    // header follows the crossovers
-    auto hz = [this] (int i) { return proc.apvts.getRawParameterValue (MBC4Processor::xoverParamId (i))->load(); };
-    const float lo = band == 0 ? 20.0f : hz (band - 1);
-    const float hi = band == 3 ? 20000.0f : hz (band);
-    if (lo != lastLo || hi != lastHi)
+    const float lo = edgeHz (band - 1), hi = edgeHz (band);
+    const bool byp = isBypassed();
+
+    if (byp != lastBypass || lo != lastLo || hi != lastHi)
     {
-        lastLo = lo; lastHi = hi;
-        if (! loFreq.isBeingEdited()) loFreq.setText (freqLabel (lo), juce::dontSendNotification);
-        if (! hiFreq.isBeingEdited()) hiFreq.setText (freqLabel (hi), juce::dontSendNotification);
-        layoutFreqRow();
-        repaint (freqRow);
+        lastBypass = byp; lastLo = lo; lastHi = hi;
+        repaint();
+        return;
     }
+
+    if (std::abs (prevShown - grShown) > 0.01f || prevReadout != grReadout)
+        repaint (juce::Rectangle<int> (Grid::grX - 24, (int) grLabelY - 8, 48, (int) (grValueY - grLabelY) + 16));
 }
 
 //==============================================================================
 void BandStrip::resized()
 {
     using namespace Grid;
-    const int left = pad, right = getWidth() - pad;
+    auto vfader = [] (CellFader& f, int cx) { f.setBounds (cx - faderW / 2, faderY, faderW, faderH); };
+    vfader (thresh, thsX);
+    vfader (range,  rngX);
+    vfader (gain,   gainX);
 
-    // header row: letter | frequency range ........ s m b
-    header = { left, pad, right - left, headerH };
-    // s m b, small square buttons on half-unit spacing
-    int bx = right;
-    for (auto* btn : { &bypass, &mute, &solo })
+    learn.setBounds (144, faderCellsY - rowB + 4 * faderRows - 16, 42, 16);
+
+    int j = 0;
+    for (auto* s : { &ratio, &knee, &attack, &release, &mix })
+        s->setBounds (6, sliderY0 - rowB + sliderPitch * j++ - 7, 228, 14);
+
+    int x = 166;
+    for (auto* btn : { &solo, &mute, &bypass })
     {
-        bx -= smallButtonD;
-        btn->setBounds (bx, pad + (headerH - smallButtonD) / 2, smallButtonD, smallButtonD);
-        bx -= u / 2;
+        btn->setBounds (x, 7, 18, 16);
+        x += 20;
     }
-    // text starts at the left edge of the first knob disc
-    const int textLeft = left + (cellW - knobD) / 2;
-    letterArea = { textLeft, pad, 2 * u, headerH };
-    freqRow    = { textLeft + 2 * u, pad, bx - (textLeft + 2 * u), headerH };
-    layoutFreqRow();
-
-    // knob grid: 3 columns x 3 rows of fixed cells
-    auto cell = [&] (int col, int row) { return juce::Rectangle<int> (left + col * cellW, knobTop + row * rowH, cellW, rowH); };
-    const std::array<std::array<Knob*, 3>, 3> layout { { { &thresh, &ratio, &knee },
-                                                         { &attack, &release, &range },
-                                                         { &mix, &gain, nullptr } } };
-    for (int row = 0; row < 3; ++row)
-        for (int col = 0; col < 3; ++col)
-            if (auto* k = layout[(size_t) row][(size_t) col])
-                k->setBounds (cell (col, row));
-
-    // match sits on the disc line of the last cell
-    const auto last = cell (2, 2);
-    learn.setBounds (juce::Rectangle<int> (6 * u, 20).withCentre ({ last.getCentreX(), last.getY() + knobInset + knobD / 2 }));
-
-    // GR meter: right edge aligned with the buttons, spanning first disc top .. last label bottom
-    const int meterTop = knobTop + knobInset;
-    const int meterBottom = knobTop + 2 * rowH + knobInset + knobBlock;
-    meterArea = { right - meterW, meterTop, meterW, meterBottom - meterTop };
 }
 
 void BandStrip::paint (juce::Graphics& g)
 {
-    const auto bounds = getLocalBounds().toFloat();
+    const Draw::Px px (g, *this);
+    using R = Fonts::Role;
+    const bool dim = isBypassed();
 
-    g.setColour (Palette::panel);
-    g.fillRoundedRectangle (bounds, Palette::radius);
+    Draw::sectionHeader (g, "0" + juce::String (band + 3), "BAND " + juce::String::charToString ((juce::juce_wchar) ('A' + band)),
+                         10.0f, headerY, dim ? Palette::dText : Palette::ink);
+    if (! freqEditor.isVisible())
+        Draw::text (g, rangeLo() + dash + rangeHi() + " Hz", rangeX, headerY, R::value, dim ? Palette::dText : Palette::ink2);
 
-    g.setColour (Palette::text);
-    g.setFont (Fonts::ui (12.0f));
-    g.drawText (juce::String::charToString ((juce::juce_wchar) ('A' + band)), letterArea, juce::Justification::centredLeft, false);
-    g.drawText ("-", loFreq.getBounds().withX (loFreq.getRight()).withWidth (12), juce::Justification::centred, false);
-    g.drawText ("hz", hiFreq.getBounds().withX (hiFreq.getRight() + 1).withWidth (24), juce::Justification::centredLeft, false);
-
-    // gain reduction meter (0 .. -24 dB, hanging from the top)
-    const auto m = meterArea.toFloat();
-    auto yOf = [&] (float db) { return m.getY() + m.getHeight() * juce::jlimit (0.0f, 1.0f, -db / meterRange); };
-
-    g.setColour (Palette::line);
-    g.fillRect (m);
-    g.setColour (Palette::text);
-    g.fillRect (m.withBottom (juce::jmax (m.getY(), yOf (grShown))));
-
-    g.setFont (Fonts::ui (11.0f));
-    g.setColour (Palette::soft);
-    g.drawText ("GR", juce::Rectangle<float> (m.getRight() - 24.0f, m.getY() - 20.0f, 24.0f, 16.0f), juce::Justification::centredRight, false);
-
-    // held value next to its line
-    if (grPeak < -0.05f)
+    // gain reduction: orange cells hanging from the top
+    const float cx = (float) Grid::grX;
+    const int lit = juce::roundToInt (juce::jlimit (0.0f, 1.0f, grShown / meterRange) * (float) Grid::faderRows);
+    juce::RectangleList<float> on, off;
+    for (int j = 0; j < Grid::faderRows; ++j)
     {
-        const float py = yOf (grPeak);
-        g.setColour (Palette::text);
-        g.fillRect (juce::Rectangle<float> (m.getX() - 4.0f, py - 0.375f, m.getWidth() + 4.0f, 0.75f));
-        g.setFont (Fonts::ui (12.0f));
-        const float ty = juce::jlimit (m.getY(), m.getBottom() - 16.0f, py - 8.0f);
-        g.drawText (juce::String (grPeak, 1), juce::Rectangle<float> (m.getX() - 48.0f, ty, 40.0f, 16.0f),
-                    juce::Justification::centredRight, false);
+        auto& list = j < lit ? on : off;
+        const float y = grCellsY + Grid::pitch * (float) j;
+        list.addWithoutMerging (px.cell (cx - 3.5f, y));
+        list.addWithoutMerging (px.cell (cx + 0.5f, y));
     }
+    g.setColour (Palette::off);  g.fillRectList (off);
+    g.setColour (dim ? Palette::dLit : Palette::accent); g.fillRectList (on);
+
+    Draw::text (g, "GR", cx, grLabelY, R::label, dim ? Palette::dText : Palette::ink, juce::Justification::centred);
+    const bool reducing = ! dim && grReadout >= 0.05f;
+    Draw::text (g, reducing ? "-" + juce::String (grReadout, 1) + " dB" : juce::String ("0.0 dB"), cx, grValueY, R::value,
+                dim ? Palette::dText : reducing ? Palette::accent : Palette::ink3, juce::Justification::centred);
 }
