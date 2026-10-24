@@ -1,6 +1,2 @@
-﻿build/
-build-mac/
-libs/
-.vs/
-
+target/
 dist/

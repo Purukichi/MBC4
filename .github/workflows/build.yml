@@ -10,26 +10,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure (universal arm64 + x86_64, JUCE fetched)
-        run: cmake -S . -B build -G Xcode
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Build VST3 / AU / Standalone
-        run: cmake --build build --config Release --parallel
+      - name: Install cargo-truce
+        run: cargo install cargo-truce --version 6.3.0 --locked
 
-      - name: Offline tests
-        run: |
-          cmake --build build --config Release --target MBC4_Tests
-          ./build/Release/MBC4_Tests
+      - name: Tests
+        run: cargo test --release --lib
+
+      - name: Build VST3 / CLAP / AU
+        run: cargo truce build --vst3 --clap --au2
 
       - name: Ad-hoc sign and package
         run: |
-          ART=build/MBC4_artefacts/Release
-          codesign --force --deep --sign - "$ART/VST3/MBC4.vst3" "$ART/AU/MBC4.component" "$ART/Standalone/MBC4.app"
           mkdir -p dist
-          ditto -c -k --keepParent "$ART/VST3/MBC4.vst3"      dist/MBC4-mac-VST3.zip
-          ditto -c -k --keepParent "$ART/AU/MBC4.component"   dist/MBC4-mac-AU.zip
-          ditto -c -k --keepParent "$ART/Standalone/MBC4.app" dist/MBC4-mac-Standalone.zip
-          for z in dist/*.zip; do zip -j "$z" Resources/Fonts/OFL.txt; done
+          cd target/bundles
+          for b in *.vst3 *.clap *.component; do
+            codesign --force --deep --sign - "$b"
+            ditto -c -k --keepParent "$b" "../../dist/MBC4-mac-${b##*.}.zip"
+          done
+          cd ../..
+          for z in dist/*.zip; do zip -j "$z" resources/fonts/OFL.txt; done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -41,24 +44,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure (JUCE fetched)
-        run: cmake -S . -B build -A x64
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build VST3 / Standalone
-        run: cmake --build build --config Release --parallel
+      - name: Install cargo-truce
+        run: cargo install cargo-truce --version 6.3.0 --locked
 
-      - name: Offline tests
-        run: |
-          cmake --build build --config Release --target MBC4_Tests
-          ./build/Release/MBC4_Tests.exe
+      - name: Tests
+        run: cargo test --release --lib
+
+      - name: Build VST3 / CLAP
+        run: cargo truce build --vst3 --clap
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path build/MBC4_artefacts/Release/VST3/MBC4.vst3 -DestinationPath dist/MBC4-win-VST3.zip
-          Compress-Archive -Path build/MBC4_artefacts/Release/Standalone/MBC4.exe -DestinationPath dist/MBC4-win-Standalone.zip
-          Get-ChildItem dist/*.zip | ForEach-Object { Compress-Archive -Update -Path Resources/Fonts/OFL.txt -DestinationPath $_.FullName }
+          Get-ChildItem target/bundles -Filter *.vst3 | ForEach-Object { Compress-Archive -Path $_.FullName -DestinationPath dist/MBC4-win-VST3.zip }
+          Get-ChildItem target/bundles -Filter *.clap | ForEach-Object { Compress-Archive -Path $_.FullName -DestinationPath dist/MBC4-win-CLAP.zip }
+          Get-ChildItem dist/*.zip | ForEach-Object { Compress-Archive -Update -Path resources/fonts/OFL.txt -DestinationPath $_.FullName }
 
       - uses: actions/upload-artifact@v4
         with:

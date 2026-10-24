@@ -1,0 +1,15 @@
+[vendor]
+name = "ongakuushi"
+id = "com.ongakuushi"
+url = "https://example.com"
+au_manufacturer = "Ongk"
+
+[[plugin]]
+name = "MBC4"
+bundle_id = "mbc4"
+crate = "mbc4"
+category = "effect"
+fourcc = "Mbc4"
+au_tag = "Effects"
+description = "4-band multiband compressor"
+vst3_subcategory = "Dynamics"
