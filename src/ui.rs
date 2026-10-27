@@ -30,11 +30,12 @@ type Ctx = PluginContext<Mbc4Params>;
 const W: f32 = COL_R + 20.0;
 const IO_W: f32 = 130.0;
 const H: f32 = FRAME_B + 40.0;
-const DEFAULT_SCALE: f32 = 1.0;
+/// "100 %": the design units drawn 1.25 times (the presets and the corner drag are relative to it)
+const DEFAULT_SCALE: f32 = 1.25;
 /// 75 – 125 % (the corner drag and the size MBC4 asks the host for)
-const SCALE_RANGE: (f32, f32) = (0.75, 1.25);
+const SCALE_RANGE: (f32, f32) = (0.75 * DEFAULT_SCALE, 1.25 * DEFAULT_SCALE);
 /// footer presets, the last one ending at the frame's right edge
-const ZOOMS: [(f32, &str); 3] = [(0.75, "75"), (1.0, "100"), (1.25, "125")];
+const ZOOMS: [(f32, &str); 3] = [(0.75 * DEFAULT_SCALE, "75"), (DEFAULT_SCALE, "100"), (1.25 * DEFAULT_SCALE, "125")];
 /// Hard floor given to the host: a host that keeps a smaller window gets the
 /// whole UI scaled down to fit instead of a clipped one.
 const MIN_FIT_SCALE: f32 = 0.5;
@@ -741,10 +742,10 @@ fn icon_rect(pen: &Pen<'_>, fr: f32, i: usize) -> [f32; 4] {
 /// 4 × 5 dot logo, the last letter in the accent
 fn logo(pen: &Pen<'_>, x: f32, y: f32) {
     const LETTERS: [[&str; 5]; 4] = [
-        ["1001", "1111", "1111", "1001", "1001"], // M
-        ["1110", "1001", "1110", "1001", "1110"], // B
-        ["0111", "1000", "1000", "1000", "0111"], // C
-        ["1010", "1010", "1111", "0010", "0010"], // 4
+        ["10001", "11011", "10101", "10001", "10001"], // M
+        ["11110", "10001", "11110", "10001", "11110"], // B
+        ["01111", "10000", "10000", "10000", "01111"], // C
+        ["10010", "10010", "11111", "00010", "00010"], // 4
     ];
     let l = pen.lat(x, y, PITCH, CELL);
     for (n, g) in LETTERS.iter().enumerate() {
@@ -752,7 +753,7 @@ fn logo(pen: &Pen<'_>, x: f32, y: f32) {
         for (r, row) in g.iter().enumerate() {
             for (cc, b) in row.chars().enumerate() {
                 if b == '1' {
-                    pen.cell(&l, n * 5 + cc, r, c);
+                    pen.cell(&l, n * 6 + cc, r, c);
                 }
             }
         }
@@ -1422,7 +1423,7 @@ impl Mbc4Ui {
             self.hover = None;
             if alt {
                 if matches!(h, Hit::Zoom(_)) {
-                    self.request_scale(st, 1.0);
+                    self.request_scale(st, DEFAULT_SCALE);
                 } else {
                     self.reset_one(st, h, p);
                 }

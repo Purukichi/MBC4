@@ -62,7 +62,8 @@ const SL_X = 46, SL_CELLS = 36, SL_W = 100 + 4 * SL_CELLS;                 // ho
 
 // ───────────────────────────────── canvas
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-let s = 1, k = 1, zoom = 1;                                // zoom: the UI size (75 – 125 %)
+const BASE = 1.25;                                         // "100 %" draws the design units 1.25 times
+let s = 1, k = 1, zoom = BASE;                             // zoom: the UI size (75 – 125 % of BASE)
 function fit() {
   const dpr = window.devicePixelRatio || 1;
   s = Math.min(zoom, innerWidth / W, innerHeight / H);
@@ -124,10 +125,10 @@ function bubble(str, x, y) {
 
 // ───────────────────────────────── dot glyphs
 const LOGO = {
-  M: ['1001','1111','1111','1001','1001'],
-  B: ['1110','1001','1110','1001','1110'],
-  C: ['0111','1000','1000','1000','0111'],
-  '4': ['1010','1010','1111','0010','0010'],
+  M: ['10001','11011','10101','10001','10001'],   // 5 x 5 cells
+  B: ['11110','10001','11110','10001','11110'],
+  C: ['01111','10000','10000','10000','01111'],
+  '4': ['10010','10010','11111','00010','00010'],
 };
 
 // ───────────────────────────────── parameters
@@ -227,7 +228,7 @@ addV(OUT_COL + 18, G, 'mix', SP.mix, 'MIX', 'gmix', null);
 ctls.forEach(ct => { if (ct.obj === G) ct.side = true; });   // the panel's controls
 ctls.push({ kind: 'io', tip: ['I/O', 'INPUT / OUTPUT（入出力ゲイン、メーター、lookahead、全体の mix）を右側に開きます。もう一度押すと格納します。'], tipKey: 'io', r: IO_R });
 // footer (system bar), right to left: UI size → 10 → theme · reset (hit = content + 6, no gaps); resize corner
-const SIZES = [[0.75, '75'], [1, '100'], [1.25, '125']], IW = 7.5 + 6;
+const SIZES = [[0.75 * BASE, '75'], [BASE, '100'], [1.25 * BASE, '125']], IW = 7.5 + 6;
 function buildFooter() {
   for (let i = ctls.length - 1; i >= 0; --i) if (ctls[i].kind === 'size' || ctls[i].kind === 'icon' || ctls[i].kind === 'corner') ctls.splice(i, 1);
   let x = FRAME_R;
@@ -470,7 +471,7 @@ function drawGr(b, x, cy) {
 function drawLogo() {
   const L = Lat(COL_L + 10, 25.5), on = new Path2D(), acc = new Path2D();   // the logo takes the heading place
   ['M', 'B', 'C', '4'].forEach((ch, n) =>
-    LOGO[ch].forEach((row, r) => [...row].forEach((bit, c) => { if (bit === '1') L.add(n === 3 ? acc : on, n * 5 + c, r); })));
+    LOGO[ch].forEach((row, r) => [...row].forEach((bit, c) => { if (bit === '1') L.add(n === 3 ? acc : on, n * 6 + c, r); })));
   ctx.fillStyle = C.ink; ctx.fill(on);
   ctx.fillStyle = C.acc; ctx.fill(acc);
 }
@@ -586,7 +587,7 @@ cv.addEventListener('pointerdown', e => {
   hideTip();
   if (!h) return;
   cv.setPointerCapture(e.pointerId);
-  if (e.altKey) { if (h.kind === 'size') setZoom(1); else defaultOf(h, p); return; }
+  if (e.altKey) { if (h.kind === 'size') setZoom(BASE); else defaultOf(h, p); return; }
   if (h.kind === 'size') { setZoom(h.v); return; }
   if (h.kind === 'io') { ioOpen = !ioOpen; layoutIo(); buildFooter(); fit(); return; }
   if (h.kind === 'icon') { if (h.act === 'reset') resetAll(); else applyTheme(theme === 'light' ? 'dark' : 'light'); return; }
@@ -602,7 +603,7 @@ cv.addEventListener('pointermove', e => {
   mouse.x = p.x; mouse.y = p.y;
   if (drag && drag.h.kind === 'corner') {
     const dz = Math.max(e.clientX - drag.x0, (e.clientY - drag.y0) * W / H) / W;
-    setZoom(clamp(drag.z0 + dz, 0.75, 1.25)); return;
+    setZoom(clamp(drag.z0 + dz, 0.75 * BASE, 1.25 * BASE)); return;
   }
   if (drag) { applyDrag(p, e.shiftKey); return; }
   hot = hitAll(p);
