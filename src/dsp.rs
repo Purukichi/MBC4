@@ -10,7 +10,7 @@
 //!
 //! Per band (stereo linked, feed-forward):
 //!   1. detection   L = 10 log10 (max (xL², xR²))            [dB, instantaneous peak]
-//!   2. gain curve  soft knee, ratio, clamped by range       → reduction r ≥ 0 [dB]
+//!   2. gain curve  soft knee, ratio                        → reduction r ≥ 0 [dB]
 //!   3. lookahead   r' = max of r over the next L samples, audio delayed by L
 //!   4. ballistics  hold = max (r', release-smoothed hold);  gr = attack-smoothed hold
 //!   5. output      gain = ((1 − mix) + mix · 10^(−gr/20)) · makeup
@@ -35,8 +35,6 @@ pub struct BandSettings {
     pub release_ms: f32,
     pub knee_db: f32,
     pub makeup_db: f32,
-    /// max gain reduction
-    pub range_db: f32,
     /// band dry / wet (0 – 1)
     pub mix: f32,
     /// band passes through unprocessed
@@ -54,7 +52,6 @@ impl Default for BandSettings {
             release_ms: 120.0,
             knee_db: 6.0,
             makeup_db: 0.0,
-            range_db: 60.0,
             mix: 1.0,
             bypass: false,
             audible: true,
@@ -322,7 +319,6 @@ struct Coeffs {
     slope: f32,
     knee: f32,
     half_knee: f32,
-    range: f32,
     att: f32,
     rel: f32,
     makeup: f32,
@@ -465,7 +461,6 @@ impl Engine {
             k.slope = 1.0 / s.ratio.max(1.0) - 1.0;
             k.knee = s.knee_db.max(0.0);
             k.half_knee = k.knee * 0.5;
-            k.range = -s.range_db.max(0.0);
             k.att = (-1.0 / (s.attack_ms.max(0.01) * 0.001 * sr)).exp();
             k.rel = (-1.0 / (s.release_ms.max(1.0) * 0.001 * sr)).exp();
             k.makeup = s.makeup_db;
@@ -535,7 +530,7 @@ impl Engine {
                 let lvl_db = power_to_db(pk2);
 
                 // 2. gain computer → reduction (≥ 0 dB)
-                let red = if k.active { -k.range.max(compute_gr(lvl_db, k.thr, k.slope, k.knee, k.half_knee)) } else { 0.0 };
+                let red = if k.active { -compute_gr(lvl_db, k.thr, k.slope, k.knee, k.half_knee) } else { 0.0 };
 
                 // 3. lookahead: worst reduction over the next L samples
                 let red_la = la.window.push(red, lookahead + 1);

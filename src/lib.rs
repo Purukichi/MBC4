@@ -34,8 +34,6 @@ pub struct Mbc4Params {
     pub a_release: FloatParam,
     #[param(name = "Low Knee", short_name = "A KNE", group = "Low", range = "linear(0, 24)", default = 6.0, unit = "dB", format = "fmt_db")]
     pub a_knee: FloatParam,
-    #[param(name = "Low Range", short_name = "A RNG", group = "Low", range = "skewed(0, 60, 0.575717)", default = 60.0, unit = "dB", format = "fmt_db")]
-    pub a_range: FloatParam,
     #[param(name = "Low Gain", short_name = "A GAIN", group = "Low", range = "linear(-24, 24)", default = 0.0, unit = "dB", format = "fmt_db")]
     pub a_gain: FloatParam,
     #[param(name = "Low Mix", short_name = "A MIX", group = "Low", range = "linear(0, 100)", default = 100.0, unit = "%", format = "fmt_pct")]
@@ -58,8 +56,6 @@ pub struct Mbc4Params {
     pub b_release: FloatParam,
     #[param(name = "LowMid Knee", short_name = "B KNE", group = "LowMid", range = "linear(0, 24)", default = 6.0, unit = "dB", format = "fmt_db")]
     pub b_knee: FloatParam,
-    #[param(name = "LowMid Range", short_name = "B RNG", group = "LowMid", range = "skewed(0, 60, 0.575717)", default = 60.0, unit = "dB", format = "fmt_db")]
-    pub b_range: FloatParam,
     #[param(name = "LowMid Gain", short_name = "B GAIN", group = "LowMid", range = "linear(-24, 24)", default = 0.0, unit = "dB", format = "fmt_db")]
     pub b_gain: FloatParam,
     #[param(name = "LowMid Mix", short_name = "B MIX", group = "LowMid", range = "linear(0, 100)", default = 100.0, unit = "%", format = "fmt_pct")]
@@ -82,8 +78,6 @@ pub struct Mbc4Params {
     pub c_release: FloatParam,
     #[param(name = "HiMid Knee", short_name = "C KNE", group = "HiMid", range = "linear(0, 24)", default = 6.0, unit = "dB", format = "fmt_db")]
     pub c_knee: FloatParam,
-    #[param(name = "HiMid Range", short_name = "C RNG", group = "HiMid", range = "skewed(0, 60, 0.575717)", default = 60.0, unit = "dB", format = "fmt_db")]
-    pub c_range: FloatParam,
     #[param(name = "HiMid Gain", short_name = "C GAIN", group = "HiMid", range = "linear(-24, 24)", default = 0.0, unit = "dB", format = "fmt_db")]
     pub c_gain: FloatParam,
     #[param(name = "HiMid Mix", short_name = "C MIX", group = "HiMid", range = "linear(0, 100)", default = 100.0, unit = "%", format = "fmt_pct")]
@@ -106,8 +100,6 @@ pub struct Mbc4Params {
     pub d_release: FloatParam,
     #[param(name = "High Knee", short_name = "D KNE", group = "High", range = "linear(0, 24)", default = 6.0, unit = "dB", format = "fmt_db")]
     pub d_knee: FloatParam,
-    #[param(name = "High Range", short_name = "D RNG", group = "High", range = "skewed(0, 60, 0.575717)", default = 60.0, unit = "dB", format = "fmt_db")]
-    pub d_range: FloatParam,
     #[param(name = "High Gain", short_name = "D GAIN", group = "High", range = "linear(-24, 24)", default = 0.0, unit = "dB", format = "fmt_db")]
     pub d_gain: FloatParam,
     #[param(name = "High Mix", short_name = "D MIX", group = "High", range = "linear(0, 100)", default = 100.0, unit = "%", format = "fmt_pct")]
@@ -120,9 +112,9 @@ pub struct Mbc4Params {
     pub d_bypass: BoolParam,
 
     // ── global
-    #[param(name = "Input", short_name = "IN", range = "linear(-24, 24)", default = 0.0, unit = "dB", format = "fmt_db")]
+    #[param(name = "Input", short_name = "IN", range = "linear(-36, 36)", default = 0.0, unit = "dB", format = "fmt_db")]
     pub in_gain: FloatParam,
-    #[param(name = "Output", short_name = "OUT", range = "linear(-24, 24)", default = 0.0, unit = "dB", format = "fmt_db")]
+    #[param(name = "Output", short_name = "OUT", range = "linear(-36, 36)", default = 0.0, unit = "dB", format = "fmt_db")]
     pub out_gain: FloatParam,
     #[param(name = "Lookahead", short_name = "LOOK", range = "linear(0, 10)", default = 0.0, unit = "ms", format = "fmt_ms")]
     pub lookahead: FloatParam,
@@ -132,12 +124,12 @@ pub struct Mbc4Params {
     #[param(name = "Bypass", short_name = "BYP", flags = "automatable | bypass")]
     pub bypass: BoolParam,
 
-    /// Editor width in logical points, remembered with the project.
+    /// Editor size, as the width of the folded layout in logical points, remembered with the project.
     #[persist = "ui_width"]
     pub ui_width: AtomicCell<u32>,
-    /// Analyser view: 0 IN+OUT, 1 OUT, 2 IN, 3 OFF.
-    #[persist = "analyzer"]
-    pub analyzer: AtomicCell<u32>,
+    /// The INPUT / OUTPUT panel on the right: 0 folded (default), 1 open.
+    #[persist = "io_open"]
+    pub io_open: AtomicCell<u32>,
 
     /// Meters, analyser feed and gain match.
     #[skip]
@@ -199,13 +191,13 @@ impl Mbc4Params {
         let any_solo = solo.iter().any(|s| *s);
         #[rustfmt::skip]
         let p = [
-            (&self.a_thresh, &self.a_ratio, &self.a_attack, &self.a_release, &self.a_knee, &self.a_gain, &self.a_range, &self.a_mix, &self.a_bypass),
-            (&self.b_thresh, &self.b_ratio, &self.b_attack, &self.b_release, &self.b_knee, &self.b_gain, &self.b_range, &self.b_mix, &self.b_bypass),
-            (&self.c_thresh, &self.c_ratio, &self.c_attack, &self.c_release, &self.c_knee, &self.c_gain, &self.c_range, &self.c_mix, &self.c_bypass),
-            (&self.d_thresh, &self.d_ratio, &self.d_attack, &self.d_release, &self.d_knee, &self.d_gain, &self.d_range, &self.d_mix, &self.d_bypass),
+            (&self.a_thresh, &self.a_ratio, &self.a_attack, &self.a_release, &self.a_knee, &self.a_gain, &self.a_mix, &self.a_bypass),
+            (&self.b_thresh, &self.b_ratio, &self.b_attack, &self.b_release, &self.b_knee, &self.b_gain, &self.b_mix, &self.b_bypass),
+            (&self.c_thresh, &self.c_ratio, &self.c_attack, &self.c_release, &self.c_knee, &self.c_gain, &self.c_mix, &self.c_bypass),
+            (&self.d_thresh, &self.d_ratio, &self.d_attack, &self.d_release, &self.d_knee, &self.d_gain, &self.d_mix, &self.d_bypass),
         ];
         let bands: [BandSettings; NUM_BANDS] = std::array::from_fn(|b| {
-            let (thr, rat, atk, rls, kne, gain, rng, mix, byp) = p[b];
+            let (thr, rat, atk, rls, kne, gain, mix, byp) = p[b];
             BandSettings {
                 thresh_db: thr.value(),
                 ratio: rat.value(),
@@ -213,7 +205,6 @@ impl Mbc4Params {
                 release_ms: rls.value(),
                 knee_db: kne.value(),
                 makeup_db: gain.value(),
-                range_db: rng.value(),
                 mix: mix.value() * 0.01,
                 bypass: byp.value(),
                 audible: !mute[b] && (!any_solo || solo[b]),

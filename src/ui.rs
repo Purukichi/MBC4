@@ -1,6 +1,7 @@
-//! MBC4 editor: one painted surface on egui (the JUCE 1.1 PC1-style UI, same layout).
+//! MBC4 editor: one painted surface on egui, PC1 style (`mockup/MBC4_PC1.html`).
 //!
-//! Everything is laid out in design units (1240 × 800) and scaled uniformly.
+//! Everything is laid out in design units (1080 × 520 folded, 1210 × 520 with the INPUT / OUTPUT panel, DESIGN_CONCEPT.md) and scaled
+//! uniformly, 75 – 125 %.
 //! Cells are snapped to whole device pixels, so every cell and gap has one
 //! size at any zoom.
 //!
@@ -12,8 +13,10 @@ use crate::{Mbc4Params, Mbc4ParamsParamId as P, hz_from_text, hz_short, ms_text,
 use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Stroke, StrokeKind, pos2, vec2};
 use realfft::{RealFftPlanner, RealToComplex};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::time::{Instant, SystemTime};
 use truce::prelude::*;
 use truce_core::editor::PluginContext;
 use truce_egui::{EditorUi, EguiEditor};
@@ -23,11 +26,15 @@ type Ctx = PluginContext<Mbc4Params>;
 
 // ───────────────────────────────── tokens
 
-const W: f32 = 1240.0;
-const H: f32 = 800.0;
-const DEFAULT_SCALE: f32 = 1.5;
-/// 100 – 180 % (the corner drag and the size MBC4 asks the host for)
-const SCALE_RANGE: (f32, f32) = (1.0, 1.8);
+/// width of the folded layout; the INPUT / OUTPUT panel adds IO_W on the right
+const W: f32 = COL_R + 20.0;
+const IO_W: f32 = 130.0;
+const H: f32 = FRAME_B + 40.0;
+const DEFAULT_SCALE: f32 = 1.0;
+/// 75 – 125 % (the corner drag and the size MBC4 asks the host for)
+const SCALE_RANGE: (f32, f32) = (0.75, 1.25);
+/// footer presets, the last one ending at the frame's right edge
+const ZOOMS: [(f32, &str); 3] = [(0.75, "75"), (1.0, "100"), (1.25, "125")];
 /// Hard floor given to the host: a host that keeps a smaller window gets the
 /// whole UI scaled down to fit instead of a clipped one.
 const MIN_FIT_SCALE: f32 = 0.5;
@@ -35,41 +42,129 @@ const MIN_FIT_SCALE: f32 = 0.5;
 fn hex(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
-
-/// PC1 style: one background colour, 0.2 px rules, near-black ink in three steps,
-/// square cells for every mark, signal orange as the only accent (on / active / cut).
-struct Pal;
-impl Pal {
-    /// the one background
-    const CELL: u32 = 0xE8E9E5;
-    const RULE: u32 = 0xC3C4BF;
-    /// text, fader caps, reference lines
-    const INK: u32 = 0x111210;
-    /// secondary text, scale numbers
-    const INK2: u32 = 0x575854;
-    /// notes, off toggles
-    const INK3: u32 = 0x8F908B;
-    /// unlit cells
-    const OFF: u32 = 0xDCDDD8;
-    /// lit cells (fader amounts)
-    const LIT: u32 = 0xB3B4AF;
-    /// selected segment, text on dark
-    const PLOT: u32 = 0xF4F4F1;
-    /// signal orange
-    const ACC: u32 = 0xFF4D0F;
-    /// input spectrum behind the output
-    const GHOST: u32 = 0xD3D4CF;
-    // disabled (bypassed band)
-    const D_LIT: u32 = 0xCBCCC7;
-    const D_KNOB: u32 = 0xA8A9A4;
-    const D_TEXT: u32 = 0xB0B1AC;
-    /// data intensity, weak → strong
-    const RAMP: [u32; 6] = [0xC7C8C3, 0xB9BAB5, 0xA6A7A2, 0x8F908B, 0x5C5D59, 0x2A2B29];
+/// `b` laid over `a` at opacity `t`, as an opaque colour
+fn lerp_col(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
-/// ramp index for row j of n (darker towards the top)
-fn ramp_index(j: usize, n: usize) -> usize {
-    ((j as f32 / n as f32 * Pal::RAMP.len() as f32 * 1.15) as usize).min(Pal::RAMP.len() - 1)
+/// One theme's colours (DESIGN_CONCEPT.md §2). Every draw looks them up through
+/// `pal()`, so a theme switch repaints everything on the next frame.
+struct Pal {
+    /// the one background
+    cell: u32,
+    rule: u32,
+    /// text, fader caps, reference lines, bubble ground
+    ink: u32,
+    /// secondary text, scale numbers
+    ink2: u32,
+    /// notes, footer buttons, off toggles
+    ink3: u32,
+    /// unlit cells, pill grooves
+    off: u32,
+    /// lit cells (fader amounts)
+    lit: u32,
+    /// data dots (spectrum, meters)
+    kept: u32,
+    /// selected segment, entry field
+    plot: u32,
+    /// signal orange
+    acc: u32,
+    /// input spectrum behind the output (not heard)
+    ghost: u32,
+    // disabled (bypassed band)
+    d_lit: u32,
+    d_knob: u32,
+    d_text: u32,
+    /// text on an `ink` ground (bubbles)
+    on_ink: u32,
+    tip_bg: (u32, u8),
+    tip_text: u32,
+}
+impl Pal {
+    const LIGHT: Pal = Pal {
+        cell: 0xEDEEEA,
+        rule: 0xB8B9B4,
+        ink: 0x0D0E0C,
+        ink2: 0x454642,
+        ink3: 0x7C7D78,
+        off: 0xDADBD6,
+        lit: 0xA9AAA5,
+        kept: 0x969792,
+        plot: 0xF9F9F6,
+        acc: 0xFF4D0F,
+        ghost: 0xCFD0CB,
+        d_lit: 0xC6C7C2,
+        d_knob: 0xA0A19C,
+        d_text: 0xA7A8A3,
+        on_ink: 0xF9F9F6,
+        tip_bg: (0x0D0E0C, 245),
+        tip_text: 0xF9F9F6,
+    };
+    const DARK: Pal = Pal {
+        cell: 0x171816,
+        rule: 0x3D3E3B,
+        ink: 0xE9EAE6,
+        ink2: 0xB3B4AF,
+        ink3: 0x83847F,
+        off: 0x262724,
+        lit: 0x50514D,
+        kept: 0x60615C,
+        plot: 0x30312E,
+        acc: 0xFF4D0F,
+        ghost: 0x2E2F2C,
+        d_lit: 0x343532,
+        d_knob: 0x4F504C,
+        d_text: 0x4C4D49,
+        on_ink: 0x171816,
+        tip_bg: (0x2A2B28, 247),
+        tip_text: 0xE9EAE6,
+    };
+}
+
+// ───────────────────────────────── theme (one setting for every PC1-style plugin)
+
+static DARK: AtomicBool = AtomicBool::new(false);
+
+fn pal() -> &'static Pal {
+    if DARK.load(Relaxed) { &Pal::DARK } else { &Pal::LIGHT }
+}
+
+/// `<config dir>/PC1-style/settings.cfg`: `key = value` lines, shared by the whole family.
+fn settings_path() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        env("APPDATA")
+    } else if cfg!(target_os = "macos") {
+        env("HOME").map(|h| h.join("Library/Application Support"))
+    } else {
+        env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")))
+    };
+    base.map(|b| b.join("PC1-style").join("settings.cfg"))
+}
+
+/// No file, or one that can't be read: light.
+fn load_theme() {
+    let text = settings_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let dark = text.lines().filter_map(|l| l.split_once('=')).any(|(k, v)| k.trim() == "theme" && v.trim() == "dark");
+    DARK.store(dark, Relaxed);
+}
+
+/// Rewrites only the `theme` line, keeping whatever else other plugins keep there.
+fn save_theme(dark: bool) {
+    let Some(path) = settings_path() else { return };
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> =
+        old.lines().filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != "theme")).map(str::to_owned).collect();
+    lines.push(format!("theme = {}", if dark { "dark" } else { "light" }));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn settings_mtime() -> Option<SystemTime> {
+    settings_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
 /// Chivo Mono Regular / Light (SIL OFL 1.1, `resources/fonts/OFL.txt`)
@@ -87,8 +182,10 @@ enum Role {
     Note,
     /// tick numbers: Light 7.5
     Tick,
+    /// the number riding on a band's GR bar: Light 6
+    Tiny,
 }
-use Role::{Label as LABEL, Note as NOTE, Tick as TICK, Value as VAL};
+use Role::{Label as LABEL, Note as NOTE, Tick as TICK, Tiny as TINY, Value as VAL};
 
 impl Role {
     fn size(self) -> f32 {
@@ -96,13 +193,14 @@ impl Role {
             Role::Label => 8.0,
             Role::Value => 9.0,
             Role::Note | Role::Tick => 7.5,
+            Role::Tiny => 6.0,
         }
     }
     fn tracking(self) -> f32 {
         match self {
             Role::Label => 0.8,
             Role::Note => 0.6,
-            Role::Value | Role::Tick => 0.0,
+            Role::Value | Role::Tick | Role::Tiny => 0.0,
         }
     }
     fn light(self) -> bool {
@@ -114,47 +212,51 @@ impl Role {
 
 const FRAME_L: f32 = 20.0;
 const FRAME_T: f32 = 20.0;
-const FRAME_R: f32 = 1220.0;
-const FRAME_B: f32 = 760.0;
-/// input | main | output
-const COL_L: f32 = 140.0;
-const COL_R: f32 = 1100.0;
-/// logo cell bottom (input column)
+/// right below the last slider row (= the fader value row)
+const FRAME_B: f32 = FADER_VALUE_Y + 16.0;
+/// footer: every text and icon centre
+const FOOT_Y: f32 = FRAME_B + 11.0;
+/// input | main | output, both side columns 95 px (the 75 px logo with 10 on each side)
+const COL_L: f32 = FRAME_L;
+const COL_R: f32 = COL_L + STRIP_W * NUM_BANDS as f32;
+/// top row (logo, SPLIT, analyser switch) bottom, across the whole frame
 const LOGO_B: f32 = 50.0;
 /// graph | band strips
-const ROW_B: f32 = 380.0;
-const STRIP_W: f32 = 240.0;
+const ROW_B: f32 = 320.0;
+const STRIP_W: f32 = 260.0;
 const PITCH: f32 = 4.0;
 const CELL: f32 = 3.0;
 // graph plot: +6 .. −72 dB
-const PLOT_L: f32 = 150.0;
-const PLOT_R: f32 = 1050.0;
+const PLOT_L: f32 = COL_L + 10.0;
+const PLOT_R: f32 = COL_R - 50.0;
 const PLOT_T: f32 = 80.0;
-const PLOT_B: f32 = 340.0;
+const PLOT_B: f32 = 280.0;
 const MAX_DB: f32 = 6.0;
 const MIN_DB: f32 = -72.0;
-/// meter peak readouts / frequency labels
-const READOUT_TOP: f32 = 352.0;
-// vertical faders: label row, 40 cells, value row
-const FADER_TOP: f32 = 418.0;
-const FADER_H: f32 = 202.0;
-const FADER_LABEL_Y: f32 = 425.0;
-const FADER_CELLS_Y: f32 = 440.0;
-const FADER_VALUE_Y: f32 = 612.0;
-const FADER_ROWS: usize = 40;
+/// meter peak readouts / frequency labels (centre line): 12 below the plot
+const READOUT_TOP: f32 = PLOT_B + 12.0;
+// vertical faders: label row, 23 cells, value row level with the last slider row
+const FADER_TOP: f32 = ROW_B + 20.0;
+const FADER_LABEL_Y: f32 = FADER_TOP + 7.0;
+const FADER_CELLS_Y: f32 = FADER_TOP + 22.0;
+const FADER_VALUE_Y: f32 = FADER_CELLS_Y + 102.0;
+const FADER_H: f32 = FADER_VALUE_Y + 7.0 - FADER_TOP;
+const FADER_ROWS: usize = 23;
 /// clickable width (they paint 44 wide)
 const FADER_GRAB: f32 = 28.0;
-// horizontal sliders: centre of the first row, from the strip's left edge
-const SLIDER_Y0: f32 = 650.0;
+// horizontal sliders (244 × 14, 36 cells): centre of the first row, level with the first fader cells
+const SLIDER_Y0: f32 = FADER_CELLS_Y + 2.0;
 const SLIDER_PITCH: f32 = 20.0;
-const SLIDER_CELLS: usize = 32;
-// band strip x offsets
-const THS_X: f32 = 30.0;
-const RNG_X: f32 = 75.0;
-const GAIN_X: f32 = 120.0;
-const GR_X: f32 = 210.0;
-const HEADER_Y: f32 = 395.0;
-const RANGE_X: f32 = 70.0;
+const SLIDER_CELLS: usize = 36;
+const SLIDER_W: f32 = 100.0 + 4.0 * SLIDER_CELLS as f32;
+// band header x offset: letter, then the range
+// GR on the graph: a line under the left end of the threshold line, 2 px a dB
+const GR_LEN: f32 = 48.0;
+const GR_BELOW: f32 = 6.0;
+/// three times the threshold line
+const GR_LINE: f32 = 1.5;
+const HEADER_Y: f32 = ROW_B + 15.0;
+const RANGE_X: f32 = 22.0;
 
 const MIN_HZ: f64 = 20.0;
 const MAX_HZ: f64 = 20000.0;
@@ -243,8 +345,6 @@ const LOOK_STEPS: Steps = Steps { step: 0.5, fine: 0.1, list: &[] };
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tip {
-    Thresh,
-    Range,
     Gain,
     Ratio,
     Knee,
@@ -259,14 +359,15 @@ enum Tip {
     Look,
     Mix,
     Output,
-    Analyzer,
+    Reset,
+    Theme,
+    Zoom,
+    Io,
 }
 
 impl Tip {
     fn text(self) -> (&'static str, &'static str) {
         match self {
-            Tip::Thresh => ("Threshold", "この値を超えた分を圧縮します。グラフの中を上下にドラッグしても変えられます。"),
-            Tip::Range => ("Range", "ゲインリダクションの上限です。"),
             Tip::Gain => ("Gain", "バンドの出力ゲイン（メイクアップ）。"),
             Tip::Ratio => ("Ratio", "圧縮の比率。"),
             Tip::Knee => ("Knee", "スレッショルド付近を滑らかにする幅。"),
@@ -281,7 +382,10 @@ impl Tip {
             Tip::Look => ("Lookahead", "先読み時間。レイテンシとしてホストに報告します。"),
             Tip::Mix => ("Mix", "全体のドライ／ウェットの割合。"),
             Tip::Output => ("Output", "出力ゲイン。"),
-            Tip::Analyzer => ("Analyzer", "スペクトラムの表示。IN+OUT / OUT / IN / OFF。"),
+            Tip::Reset => ("Reset", "すべてのつまみとクロスオーバーを初期値に戻します。Ctrl+Z で元に戻せます。"),
+            Tip::Theme => ("Theme", "ライト / ダークを切り替えます。すべての PC1 系プラグインで共通の設定です。"),
+            Tip::Zoom => ("UI size", "エディターの大きさ。右下の角をドラッグすると 75 – 125 % の間で細かく変えられます。"),
+            Tip::Io => ("I/O", "INPUT / OUTPUT（入出力ゲイン、メーター、lookahead、全体の mix）を右側に開きます。もう一度押すと格納します。"),
         }
     }
 }
@@ -292,18 +396,17 @@ const RAT: usize = 1;
 const ATK: usize = 2;
 const RLS: usize = 3;
 const KNE: usize = 4;
-const RNG: usize = 5;
-const GAIN: usize = 6;
-const MIX: usize = 7;
-const SOLO: usize = 8;
-const BYP: usize = 10;
+const GAIN: usize = 5;
+const MIX: usize = 6;
+const SOLO: usize = 7;
+const BYP: usize = 9;
 
 #[rustfmt::skip]
-const BAND_IDS: [[P; 11]; NUM_BANDS] = [
-    [P::AThresh, P::ARatio, P::AAttack, P::ARelease, P::AKnee, P::ARange, P::AGain, P::AMix, P::ASolo, P::AMute, P::ABypass],
-    [P::BThresh, P::BRatio, P::BAttack, P::BRelease, P::BKnee, P::BRange, P::BGain, P::BMix, P::BSolo, P::BMute, P::BBypass],
-    [P::CThresh, P::CRatio, P::CAttack, P::CRelease, P::CKnee, P::CRange, P::CGain, P::CMix, P::CSolo, P::CMute, P::CBypass],
-    [P::DThresh, P::DRatio, P::DAttack, P::DRelease, P::DKnee, P::DRange, P::DGain, P::DMix, P::DSolo, P::DMute, P::DBypass],
+const BAND_IDS: [[P; 10]; NUM_BANDS] = [
+    [P::AThresh, P::ARatio, P::AAttack, P::ARelease, P::AKnee, P::AGain, P::AMix, P::ASolo, P::AMute, P::ABypass],
+    [P::BThresh, P::BRatio, P::BAttack, P::BRelease, P::BKnee, P::BGain, P::BMix, P::BSolo, P::BMute, P::BBypass],
+    [P::CThresh, P::CRatio, P::CAttack, P::CRelease, P::CKnee, P::CGain, P::CMix, P::CSolo, P::CMute, P::CBypass],
+    [P::DThresh, P::DRatio, P::DAttack, P::DRelease, P::DKnee, P::DGain, P::DMix, P::DSolo, P::DMute, P::DBypass],
 ];
 const XO_IDS: [P; 3] = [P::Xover1, P::Xover2, P::Xover3];
 
@@ -314,7 +417,7 @@ fn bid(b: usize, slot: usize) -> u32 {
 // ───────────────────────────────── controls
 
 /// Fader drawn with cells: the cells from the base value to the current value are lit,
-/// the value's own cell is black with a thin needle through it.
+/// the value's own cell (the whole row) is the knob, in `ink`; nothing else is drawn.
 #[derive(Clone, Copy)]
 struct Fader {
     id: u32,
@@ -328,6 +431,8 @@ struct Fader {
     steps: Steps,
     format: Format,
     tip: Tip,
+    /// the knob sits on the input / output meter (its rows), the value under the readout
+    on_meter: bool,
 }
 
 impl Fader {
@@ -335,10 +440,14 @@ impl Fader {
         if self.vertical { FADER_ROWS } else { SLIDER_CELLS }
     }
     fn rect(&self) -> [f32; 4] {
-        if self.vertical { [self.x - FADER_GRAB / 2.0, self.y, FADER_GRAB, FADER_H] } else { [self.x, self.y - 7.0, 228.0, 14.0] }
+        if self.on_meter {
+            [self.x - FADER_GRAB / 2.0, PLOT_T, FADER_GRAB, PLOT_B - PLOT_T]
+        } else if self.vertical { [self.x - FADER_GRAB / 2.0, self.y, FADER_GRAB, FADER_H] } else { [self.x, self.y - 7.0, SLIDER_W, 14.0] }
     }
     fn value_rect(&self) -> [f32; 4] {
-        if self.vertical { [self.x - 22.0, FADER_VALUE_Y - 7.0, 44.0, 14.0] } else { [self.x + 174.0, self.y - 7.0, 50.0, 14.0] }
+        if self.on_meter {
+            [self.x - 22.0, METER_VALUE_Y - 7.0, 44.0, 14.0]
+        } else if self.vertical { [self.x - 22.0, FADER_VALUE_Y - 7.0, 44.0, 14.0] } else { [self.x + SLIDER_W - 54.0, self.y - 7.0, 50.0, 14.0] }
     }
 }
 
@@ -346,54 +455,76 @@ fn faders() -> Vec<Fader> {
     let mut v = Vec::new();
     for b in 0..NUM_BANDS {
         let x0 = strip_x(b);
-        for (slot, cx, label, tip) in [(THR, THS_X, "THS", Tip::Thresh), (RNG, RNG_X, "RNG", Tip::Range), (GAIN, GAIN_X, "GAIN", Tip::Gain)] {
-            v.push(Fader { id: bid(b, slot), vertical: true, x: x0 + cx, y: FADER_TOP, band: Some(b), label, steps: DB_STEPS, format: Format::Db, tip });
-        }
+        // the threshold lives on the graph; everything else is a horizontal slider
         for (j, (slot, label, steps, format, tip)) in [
             (RAT, "RAT", RATIO_STEPS, Format::Ratio, Tip::Ratio),
             (KNE, "KNE", DB_STEPS, Format::Db, Tip::Knee),
             (ATK, "ATK", ATK_STEPS, Format::Ms, Tip::Attack),
             (RLS, "RLS", RLS_STEPS, Format::Ms, Tip::Release),
+            (GAIN, "GAIN", DB_STEPS, Format::Db, Tip::Gain),
             (MIX, "MIX", MIX_STEPS, Format::Percent, Tip::BandMix),
         ]
         .into_iter()
         .enumerate()
         {
             let y = SLIDER_Y0 + SLIDER_PITCH * j as f32;
-            v.push(Fader { id: bid(b, slot), vertical: false, x: x0 + 6.0, y, band: Some(b), label, steps, format, tip });
+            v.push(Fader { id: bid(b, slot), vertical: false, x: x0 + 6.0, y, band: Some(b), label, steps, format, tip, on_meter: false });
         }
     }
+    // input / output gain: knobs on the meters
+    for (id, cx, label, tip) in [(P::InGain, IN_METER_X, "IN", Tip::Input), (P::OutGain, OUT_METER_X, "OUT", Tip::Output)] {
+        v.push(Fader { id: id.into(), vertical: true, x: cx, y: PLOT_T, band: None, label, steps: DB_STEPS, format: Format::Db, tip, on_meter: true });
+    }
     for (id, cx, label, steps, format, tip) in [
-        (P::InGain, 80.0, "IN", DB_STEPS, Format::Db, Tip::Input),
-        (P::Lookahead, 1124.0, "LOOK", LOOK_STEPS, Format::Ms, Tip::Look),
-        (P::Mix, 1160.0, "MIX", MIX_STEPS, Format::Percent, Tip::Mix),
-        (P::OutGain, 1196.0, "OUT", DB_STEPS, Format::Db, Tip::Output),
+        (P::Lookahead, OUT_COL - 18.0, "LOOK", LOOK_STEPS, Format::Ms, Tip::Look),
+        (P::Mix, OUT_COL + 18.0, "MIX", MIX_STEPS, Format::Percent, Tip::Mix),
     ] {
-        v.push(Fader { id: id.into(), vertical: true, x: cx, y: FADER_TOP, band: None, label, steps, format, tip });
+        v.push(Fader { id: id.into(), vertical: true, x: cx, y: FADER_TOP, band: None, label, steps, format, tip, on_meter: false });
     }
     v
 }
 
+/// the gain value under a meter's dot readout
+const METER_VALUE_Y: f32 = READOUT_TOP + 14.0;
+/// the INPUT / OUTPUT panel: two 65 px columns right of the bands (one LOOK / MIX block below)
+const OUT_COL: f32 = COL_R + IO_W / 2.0;
+const IN_METER_X: f32 = COL_R + IO_W / 4.0;
+const OUT_METER_X: f32 = OUT_COL + IO_W / 4.0;
+/// I/O: the letter button at the right end of the top row
+const IO_RECT: [f32; 4] = [COL_R - 10.0 - 24.0, FRAME_T + 7.0, 24.0, 16.0];
+/// the editor's design width for the panel state
+fn width_of(open: bool) -> f32 {
+    if open { W + IO_W } else { W }
+}
+fn frame_r(open: bool) -> f32 {
+    width_of(open) - 20.0
+}
+
+/// S / M / B letter buttons (12 × 16 each, no gaps), the last one ending 10 inside the strip
 fn toggle_rect(b: usize, j: usize) -> [f32; 4] {
-    [strip_x(b) + 166.0 + 20.0 * j as f32, ROW_B + 7.0, 18.0, 16.0]
+    [strip_x(b) + STRIP_W - 10.0 - 12.0 * (3 - j) as f32, ROW_B + 7.0, 12.0, 16.0]
 }
+/// gain match: in the header, 6 left of S / M / B
 fn match_rect(b: usize) -> [f32; 4] {
-    [strip_x(b) + 144.0, FADER_CELLS_Y + 4.0 * FADER_ROWS as f32 - 16.0, 42.0, 16.0]
+    [toggle_rect(b, 0)[0] - 6.0 - 42.0, ROW_B + 7.0, 42.0, 16.0]
 }
-const MODES: [&str; 4] = ["IN+OUT", "OUT", "IN", "OFF"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
     Fader(usize),
     Toggle(usize, usize),
     Match(usize),
-    Mode(usize),
     Xo(usize),
     Thresh(usize),
     Plot,
     /// band header: low / high edge frequency text
     BandLo(usize),
     BandHi(usize),
+    /// footer: 0 = reset, 1 = theme
+    Icon(usize),
+    /// opens / folds the INPUT / OUTPUT panel
+    Io,
+    Zoom(usize),
     Resize,
 }
 
@@ -485,21 +616,12 @@ impl Pen<'_> {
         let y1 = ((y + h) * self.k).round().max(y0 + 1.0);
         self.p.rect_filled(Rect::from_min_max(self.px(x0, y0), self.px(x1, y1)), 0.0, col);
     }
-    /// one-device-pixel frame of a snapped rectangle
-    fn outline(&self, x: f32, y: f32, w: f32, h: f32, col: Color32) {
-        let (x0, y0) = ((x * self.k).round(), (y * self.k).round());
-        let x1 = ((x + w) * self.k).round().max(x0 + 1.0);
-        let y1 = ((y + h) * self.k).round().max(y0 + 1.0);
-        for (a, b, c, d) in [(x0, y0, x1, y0 + 1.0), (x0, y1 - 1.0, x1, y1), (x0, y0, x0 + 1.0, y1), (x1 - 1.0, y0, x1, y1)] {
-            self.p.rect_filled(Rect::from_min_max(self.px(a, b), self.px(c, d)), 0.0, col);
-        }
-    }
     /// 0.2 px rules
     fn rule_h(&self, x1: f32, x2: f32, y: f32) {
-        self.fill(x1, y - 0.1, x2 - x1, 0.2, hex(Pal::RULE));
+        self.fill(x1, y - 0.1, x2 - x1, 0.2, hex(pal().rule));
     }
     fn rule_v(&self, x: f32, y1: f32, y2: f32) {
-        self.fill(x - 0.1, y1, 0.2, y2 - y1, hex(Pal::RULE));
+        self.fill(x - 0.1, y1, 0.2, y2 - y1, hex(pal().rule));
     }
     fn dev(&self, t: f32) -> f32 {
         (t * self.k).round().max(1.0)
@@ -558,66 +680,62 @@ impl Pen<'_> {
         let h = 14.0;
         let x = (cx - w / 2.0).min((max_x - w).max(min_x)).max(min_x);
         let r = Rect::from_min_max(self.at(x, cy - h / 2.0), self.at(x + w, cy + h / 2.0));
-        self.p.rect_filled(r, (3.0 * self.s) as u8, hex(Pal::INK));
-        self.text(s, x + w / 2.0, cy, VAL, hex(Pal::PLOT), Align2::CENTER_CENTER);
+        self.p.rect_filled(r, (3.0 * self.s) as u8, hex(pal().ink));
+        self.text(s, x + w / 2.0, cy, VAL, hex(pal().on_ink), Align2::CENTER_CENTER);
     }
-    fn section_header(&self, number: &str, name: &str, x: f32, y: f32, col: Color32) {
-        self.text(number, x, y, NOTE, hex(Pal::INK3), Align2::LEFT_CENTER);
-        self.text(name, x + 14.0, y, LABEL, col, Align2::LEFT_CENTER);
+    /// section name only (no number)
+    fn section_header(&self, name: &str, x: f32, y: f32, col: Color32) {
+        self.text(name, x, y, LABEL, col, Align2::LEFT_CENTER);
+    }
+    /// Line icon in a 7.5 box (the note text's size) centred on (cx, cy); strokes 1/8 of the box.
+    fn icon(&self, which: usize, cx: f32, cy: f32, col: Color32) {
+        const BOX: f32 = 7.5;
+        let t = (BOX / 8.0 * self.s).max(1.0 / self.ppp);
+        let stroke = Stroke::new(t, col);
+        let ts = t / self.s;
+        if which == 0 {
+            // reset: a full-size circle open between 1 and 2 o'clock, a filled arrow head on the 2 o'clock end
+            let r = BOX / 2.0 - ts / 2.0;
+            let deg = std::f32::consts::PI / 180.0;
+            let (a0, a1) = (-30.0 * deg, 300.0 * deg);
+            let pt = |a: f32, rr: f32| self.at(cx + rr * a.cos(), cy + rr * a.sin());
+            let arc: Vec<Pos2> = (0..=32).map(|i| pt(a0 + (a1 - a0) * i as f32 / 32.0, r)).collect();
+            self.p.add(egui::Shape::line(arc, stroke));
+            // pointing along the circle, into the opening
+            let (ex, ey) = (cx + r * a0.cos(), cy + r * a0.sin());
+            let (tx, ty) = (a0.sin(), -a0.cos());
+            let (len, half) = (2.4, 1.7);
+            let tri = vec![
+                self.at(ex + tx * len, ey + ty * len),
+                self.at(ex - ty * half, ey + tx * half),
+                self.at(ex + ty * half, ey - tx * half),
+            ];
+            self.p.add(egui::Shape::convex_polygon(tri, col, Stroke::NONE));
+        } else {
+            // theme: a full-size square, left half filled
+            let r = Rect::from_center_size(self.at(cx, cy), vec2(BOX, BOX) * self.s);
+            self.p.rect_stroke(r, 0.0, stroke, StrokeKind::Inside);
+            self.p.rect_filled(Rect::from_min_max(r.min, pos2(r.center().x, r.max.y)), 0.0, col);
+        }
     }
 }
 
-const DIGITS: [[&str; 7]; 10] = [
-    ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
-    ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
-    ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
-    ["11111", "00010", "00100", "00010", "00001", "10001", "01110"],
-    ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
-    ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
-    ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
-    ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
-    ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
-    ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
-];
-const MINUS: [&str; 7] = ["00000", "00000", "00000", "11111", "00000", "00000", "00000"];
-const PLUS: [&str; 7] = ["00000", "00100", "00100", "11111", "00100", "00100", "00000"];
-const DOT: [&str; 7] = ["0", "0", "0", "0", "0", "0", "1"];
-
-fn digit_glyph(ch: char) -> Option<&'static [&'static str; 7]> {
-    match ch {
-        '0'..='9' => Some(&DIGITS[ch as usize - '0' as usize]),
-        '-' => Some(&MINUS),
-        '+' => Some(&PLUS),
-        '.' => Some(&DOT),
-        _ => None,
+/// UI size buttons: ink width + 6, the last one ending at the frame's right edge (`fr`)
+fn zoom_rects(pen: &Pen<'_>, fr: f32) -> [[f32; 4]; 3] {
+    let mut out = [[0.0; 4]; 3];
+    let mut x = fr;
+    for i in (0..ZOOMS.len()).rev() {
+        let w = pen.text_w(ZOOMS[i].1, NOTE) + 6.0;
+        x -= w;
+        out[i] = [x, FOOT_Y - 7.0, w, 14.0];
     }
+    out
 }
-
-/// 5 × 7 dot-matrix number, unlit dots drawn faintly
-fn dot_number(pen: &Pen<'_>, s: &str, cx: f32, top: f32, col: Color32) {
-    // glyph columns (1 empty column between glyphs), on a 2 px pitch
-    let mut cols: i32 = -1;
-    for ch in s.chars() {
-        if let Some(g) = digit_glyph(ch) {
-            cols += g[0].len() as i32 + 1;
-        }
-    }
-    if cols <= 0 {
-        return;
-    }
-    let probe = pen.lat(0.0, 0.0, 2.0, 1.6);
-    let l = pen.lat(cx - probe.ext(cols as usize) * 0.5, top, 2.0, 1.6);
-    let mut col0 = 0;
-    for ch in s.chars() {
-        let Some(g) = digit_glyph(ch) else { continue };
-        let w = g[0].len();
-        for (r, row) in g.iter().enumerate() {
-            for (c, b) in row.chars().enumerate() {
-                pen.cell(&l, col0 + c, r, if b == '1' { col } else { hex(Pal::OFF) });
-            }
-        }
-        col0 += w + 1;
-    }
+/// footer icons: theme 10 left of the size buttons, reset right next to it (7.5 + 6 wide)
+fn icon_rect(pen: &Pen<'_>, fr: f32, i: usize) -> [f32; 4] {
+    const IW: f32 = 7.5 + 6.0;
+    let theme_x = zoom_rects(pen, fr)[0][0] - 10.0 - IW;
+    [if i == 1 { theme_x } else { theme_x - IW }, FOOT_Y - 7.0, IW, 14.0]
 }
 
 /// 4 × 5 dot logo, the last letter in the accent
@@ -630,7 +748,7 @@ fn logo(pen: &Pen<'_>, x: f32, y: f32) {
     ];
     let l = pen.lat(x, y, PITCH, CELL);
     for (n, g) in LETTERS.iter().enumerate() {
-        let c = if n == 3 { hex(Pal::ACC) } else { hex(Pal::INK) };
+        let c = if n == 3 { hex(pal().acc) } else { hex(pal().ink) };
         for (r, row) in g.iter().enumerate() {
             for (cc, b) in row.chars().enumerate() {
                 if b == '1' {
@@ -648,25 +766,6 @@ const FFT: usize = 2048;
 const NUM_COLS: usize = 225;
 const TILT_DB_PER_OCT: f32 = 3.0;
 const SILENT_DB: f32 = MIN_DB - 20.0;
-
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Both,
-    Post,
-    Pre,
-    Off,
-}
-
-impl Mode {
-    fn from(i: u32) -> Self {
-        match i {
-            1 => Mode::Post,
-            2 => Mode::Pre,
-            3 => Mode::Off,
-            _ => Mode::Both,
-        }
-    }
-}
 
 struct Spectrum {
     last_head: usize,
@@ -723,12 +822,11 @@ impl Analyzer {
         }
     }
 
-    /// The pre / post spectrum: pull new samples, analyse when there are enough.
-    fn update(&mut self, sh: &Shared, mode: Mode) {
+    /// The pre / post spectrum (always both): pull new samples, analyse when there are enough.
+    fn update(&mut self, sh: &Shared) {
         let sr = sh.sample_rate.load(std::sync::atomic::Ordering::Relaxed) as f32;
-        // the input is also needed in "out" mode: it shows how much each band removes
-        self.analyse(&sh.pre, true, mode != Mode::Off, sr);
-        self.analyse(&sh.post, false, mode == Mode::Both || mode == Mode::Post, sr);
+        self.analyse(&sh.pre, true, true, sr);
+        self.analyse(&sh.post, false, true, sr);
     }
 
     fn analyse(&mut self, ring: &Ring, pre: bool, on: bool, sr: f32) {
@@ -740,10 +838,10 @@ impl Analyzer {
             return;
         }
         s.new_samples += got;
-        if s.new_samples < FFT / 4 || sr <= 0.0 {
+        if s.new_samples < FFT / 8 || sr <= 0.0 {
             // no fresh audio: let the spectrum fall
             for v in &mut s.display {
-                *v = (*v - 1.5).max(SILENT_DB);
+                *v = (*v - 0.75).max(SILENT_DB);
             }
             return;
         }
@@ -796,7 +894,8 @@ impl Analyzer {
             }
             let db = acc / wsum;
             let v = &mut s.display[i];
-            *v += (db - *v) * if db > *v { 0.5 } else { 0.14 };
+            // per 60 Hz tick: a soft rise and a slow fall, so the cells glide instead of jumping
+            *v += (db - *v) * if db > *v { 0.25 } else { 0.06 };
         }
     }
 }
@@ -815,34 +914,30 @@ impl Meter {
         Self { shown: -100.0, hold: -100.0, hold_time: 0 }
     }
     fn update(&mut self, v: f32) {
-        self.shown = if v > self.shown { v } else { v.max(self.shown - 1.2) };
+        self.shown = if v > self.shown { v } else { v.max(self.shown - 0.6) };
         // held value: stays 1.5 s, then falls slowly so it can be read
         if v >= self.hold {
             self.hold = v;
-            self.hold_time = 45;
+            self.hold_time = 90;
         } else {
             self.hold_time -= 1;
             if self.hold_time < 0 {
-                self.hold = v.max(self.hold - 0.6);
+                self.hold = v.max(self.hold - 0.3);
             }
         }
     }
 }
 
-/// GR meter: 0 .. 24 dB over 40 cells
+/// GR line: 0 .. 24 dB over GR_LEN
 const GR_METER_RANGE: f32 = 24.0;
-/// held GR value: refreshed every 0.5 s
-const READOUT_HOLD_FRAMES: i32 = 15;
 const LEARN_SECONDS: f64 = 3.0;
 /// display ticks per second (the JUCE editor timer)
-const TICK_HZ: f32 = 30.0;
+const TICK_HZ: f32 = 60.0;
 
 #[derive(Clone, Copy, Default)]
 struct GrMeter {
+    /// positive dB, refreshed every display tick (60 Hz), the bar and its number alike
     shown: f32,
-    window_peak: f32,
-    readout: f32,
-    frames: i32,
 }
 
 // ───────────────────────────────── editor state
@@ -890,15 +985,26 @@ pub struct Mbc4Ui {
     mouse: Pos2,
     hover: Option<(Hit, Instant)>,
     edit: Option<Edit>,
-    /// segment widths of the analyser switch (measured while drawing)
-    mode_w: [f32; 4],
     last_req: Option<(u32, u32)>,
     asked_size: bool,
+    /// undo history: a settled change made here is one step
+    ids: Vec<u32>,
+    undo: Vec<Vec<f64>>,
+    redo: Vec<Vec<f64>>,
+    committed: Option<Vec<f64>>,
+    ui_dirty: bool,
+    last_wheel: Option<Instant>,
+    /// the shared settings file, re-read when another plugin changes it
+    theme_mtime: Option<SystemTime>,
+    theme_check: Option<Instant>,
 }
 
 impl Mbc4Ui {
     fn new(params: Arc<Mbc4Params>) -> Self {
-        let infos = params.param_infos().into_iter().map(|i| (i.id, (i.range.clone(), i.default_plain))).collect();
+        let infos: HashMap<u32, (ParamRange, f64)> =
+            params.param_infos().into_iter().map(|i| (i.id, (i.range.clone(), i.default_plain))).collect();
+        let mut ids: Vec<u32> = infos.keys().copied().collect();
+        ids.sort_unstable();
         let an = Analyzer::new(&params.shared);
         Self {
             params,
@@ -919,9 +1025,16 @@ impl Mbc4Ui {
             mouse: pos2(-100.0, -100.0),
             hover: None,
             edit: None,
-            mode_w: [54.0, 35.0, 28.0, 35.0],
             last_req: None,
             asked_size: false,
+            ids,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            committed: None,
+            ui_dirty: false,
+            last_wheel: None,
+            theme_mtime: None,
+            theme_check: None,
         }
     }
 
@@ -942,17 +1055,115 @@ impl Mbc4Ui {
     fn bounds(&self, id: u32) -> (f64, f64) {
         self.infos.get(&id).map_or((0.0, 1.0), |(r, _)| (r.min(), r.max()))
     }
-    fn set(&self, st: &Ctx, id: u32, plain: f64) {
+    fn set(&mut self, st: &Ctx, id: u32, plain: f64) {
         st.set_param(id, self.norm(id, plain));
+        self.ui_dirty = true;
     }
     /// one complete host gesture
-    fn set_once(&self, st: &Ctx, id: u32, plain: f64) {
+    fn set_once(&mut self, st: &Ctx, id: u32, plain: f64) {
         st.begin_edit(id);
         self.set(st, id, plain);
         st.end_edit(id);
     }
     fn default_of(&self, id: u32) -> f64 {
         self.infos.get(&id).map_or(0.0, |i| i.1)
+    }
+
+    // ── history: one drag, one wheel gesture or one click is one undo step
+
+    fn snapshot(&self, st: &Ctx) -> Vec<f64> {
+        self.ids.iter().map(|id| self.plain(st, *id)).collect()
+    }
+    fn commit(&mut self, st: &Ctx) {
+        if self.drag.is_some() || self.edit.is_some() || self.last_wheel.is_some_and(|t| t.elapsed().as_millis() < 400) {
+            return;
+        }
+        let now = self.snapshot(st);
+        match &self.committed {
+            None => self.committed = Some(now),
+            Some(c) if *c == now => {}
+            Some(c) => {
+                // host-side changes (automation, presets) move the baseline but are not undo steps
+                if self.ui_dirty {
+                    self.undo.push(c.clone());
+                    if self.undo.len() > 100 {
+                        self.undo.remove(0);
+                    }
+                    self.redo.clear();
+                }
+                self.committed = Some(now);
+            }
+        }
+        self.ui_dirty = false;
+    }
+    fn restore(&mut self, st: &Ctx, snap: Vec<f64>) {
+        let cur = self.snapshot(st);
+        for (i, id) in self.ids.clone().into_iter().enumerate() {
+            if (cur[i] - snap[i]).abs() > 1e-9 {
+                self.set_once(st, id, snap[i]);
+            }
+        }
+        self.committed = Some(snap);
+        self.ui_dirty = false;
+    }
+    fn do_undo(&mut self, st: &Ctx) {
+        self.commit(st);
+        if let Some(s) = self.undo.pop() {
+            if let Some(c) = self.committed.take() {
+                self.redo.push(c);
+            }
+            self.restore(st, s);
+        }
+    }
+    fn do_redo(&mut self, st: &Ctx) {
+        self.commit(st);
+        if let Some(s) = self.redo.pop() {
+            if let Some(c) = self.committed.take() {
+                self.undo.push(c);
+            }
+            self.restore(st, s);
+        }
+    }
+    /// the footer's reset: every parameter back to its default
+    fn reset_all(&mut self, st: &Ctx) {
+        for id in self.ids.clone() {
+            let d = self.default_of(id);
+            if (self.plain(st, id) - d).abs() > 1e-9 {
+                self.set_once(st, id, d);
+            }
+        }
+    }
+    /// Alt + click / double-click: the control under the cursor back to its default
+    fn reset_one(&mut self, st: &Ctx, h: Hit, p: Pos2) {
+        let id = match h {
+            Hit::Fader(i) => self.faders[i].id,
+            Hit::Xo(i) => XO_IDS[i].into(),
+            Hit::Thresh(b) => bid(b, THR),
+            Hit::Plot => bid(self.band_at(st, p.x), THR),
+            _ => return,
+        };
+        self.set_once(st, id, self.default_of(id));
+    }
+    /// a preset: ask the host for that size, aspect ratio kept
+    fn request_scale(&mut self, st: &Ctx, z: f32) {
+        let (rw, rh) = ((self.w() * z).round() as u32, (H * z).round() as u32);
+        self.last_req = Some((rw, rh));
+        let _ = st.request_resize(rw, rh);
+    }
+    fn io_open(&self) -> bool {
+        self.params.io_open.load() != 0
+    }
+    /// design width of the current layout
+    fn w(&self) -> f32 {
+        width_of(self.io_open())
+    }
+    /// open / fold the INPUT / OUTPUT panel: the window grows or shrinks on the right, same scale
+    fn toggle_io(&mut self, st: &Ctx, s: f32) {
+        let open = !self.io_open();
+        self.params.io_open.store(u32::from(open));
+        let (rw, rh) = ((width_of(open) * s).round() as u32, (H * s).round() as u32);
+        self.last_req = Some((rw, rh));
+        let _ = st.request_resize(rw, rh);
     }
     fn bypassed(&self, st: &Ctx, b: usize) -> bool {
         self.on(st, bid(b, BYP))
@@ -1014,15 +1225,18 @@ impl Mbc4Ui {
         let x = strip_x(b) + RANGE_X + pen.text_w(&format!("{}{DASH}", self.range_lo(st, b)), VAL);
         [x - 2.0, HEADER_Y - 7.0, pen.text_w(&self.range_hi(st, b), VAL) + 4.0, 14.0]
     }
-    fn mode_rect(&self, i: usize) -> [f32; 4] {
-        let total: f32 = self.mode_w.iter().sum();
-        let x0 = COL_R - 10.0 - total.ceil();
-        [x0 + self.mode_w[..i].iter().sum::<f32>(), FRAME_T + 7.0, self.mode_w[i], 16.0]
-    }
 
     fn hit(&self, pen: &Pen<'_>, st: &Ctx, p: Pos2) -> Option<Hit> {
+        let open = self.io_open();
+        if in_r(IO_RECT, p) {
+            return Some(Hit::Io);
+        }
         for (i, f) in self.faders.iter().enumerate() {
-            if in_r(f.rect(), p) {
+            // the panel's controls only while it is open
+            if f.band.is_none() && !open {
+                continue;
+            }
+            if in_r(f.rect(), p) || (f.on_meter && in_r(f.value_rect(), p)) {
                 return Some(Hit::Fader(i));
             }
         }
@@ -1042,12 +1256,19 @@ impl Mbc4Ui {
                 return Some(Hit::BandHi(b));
             }
         }
-        for i in 0..MODES.len() {
-            if in_r(self.mode_rect(i), p) {
-                return Some(Hit::Mode(i));
+        let fr = frame_r(open);
+        for (i, r) in zoom_rects(pen, fr).into_iter().enumerate() {
+            if in_r(r, p) {
+                return Some(Hit::Zoom(i));
             }
         }
-        if in_r([FRAME_R - 2.0, FRAME_B + 2.0, W - FRAME_R + 2.0, H - FRAME_B - 2.0], p) {
+        for i in 0..2 {
+            if in_r(icon_rect(pen, fr, i), p) {
+                return Some(Hit::Icon(i));
+            }
+        }
+        let w = width_of(open);
+        if in_r([w - 16.0, H - 16.0, 16.0, 16.0], p) {
             return Some(Hit::Resize);
         }
         // the graph: crossover lines, then the band's threshold, then the plot
@@ -1080,7 +1301,10 @@ impl Mbc4Ui {
             Hit::Toggle(_, 1) => Tip::Mute,
             Hit::Toggle(..) => Tip::Bypass,
             Hit::Match(_) => Tip::Match,
-            Hit::Mode(_) => Tip::Analyzer,
+            Hit::Icon(0) => Tip::Reset,
+            Hit::Icon(_) => Tip::Theme,
+            Hit::Io => Tip::Io,
+            Hit::Zoom(_) => Tip::Zoom,
             // the graph shows bubbles instead
             Hit::Xo(_) | Hit::Thresh(_) | Hit::Plot | Hit::BandLo(_) | Hit::BandHi(_) | Hit::Resize => return None,
         })
@@ -1090,7 +1314,7 @@ impl Mbc4Ui {
 
     #[allow(clippy::too_many_lines)]
     fn input(&mut self, ctx: &egui::Context, pen: &Pen<'_>, st: &Ctx) {
-        let (pos, pressed, down, released, dbl, fine, wheel) = ctx.input(|i| {
+        let (pos, pressed, down, released, dbl, fine, alt, wheel, keys) = ctx.input(|i| {
             let m = i.modifiers;
             let wheel: Vec<f32> = i
                 .raw
@@ -1110,10 +1334,19 @@ impl Mbc4Ui {
                 i.pointer.primary_down(),
                 i.pointer.primary_released(),
                 i.pointer.button_double_clicked(egui::PointerButton::Primary),
-                m.shift || m.ctrl || m.command || m.mac_cmd,
+                m.shift || m.ctrl,
+                m.alt,
                 wheel,
+                (m.command, m.shift, i.key_pressed(egui::Key::Z), i.key_pressed(egui::Key::Y)),
             )
         });
+        // undo / redo live on the keyboard only
+        let (cmd, shift, z, y) = keys;
+        if cmd && z && !shift {
+            self.do_undo(st);
+        } else if cmd && ((z && shift) || y) {
+            self.do_redo(st);
+        }
         let Some(pos) = pos else {
             if self.drag.is_none() {
                 self.hot = None;
@@ -1134,8 +1367,9 @@ impl Mbc4Ui {
             } else {
                 if d.hit == Hit::Resize {
                     // the corner: ask the host for a new size, aspect ratio kept
-                    let w = (d.w0 + (pos.x - d.start.x).max((pos.y - d.start.y) * W / H)).clamp(W * SCALE_RANGE.0, W * SCALE_RANGE.1);
-                    let (rw, rh) = (w.round() as u32, (w * H / W).round() as u32);
+                    let ww = self.w();
+                    let w = (d.w0 + (pos.x - d.start.x).max((pos.y - d.start.y) * ww / H)).clamp(ww * SCALE_RANGE.0, ww * SCALE_RANGE.1);
+                    let (rw, rh) = (w.round() as u32, (w * H / ww).round() as u32);
                     if self.last_req != Some((rw, rh)) {
                         self.last_req = Some((rw, rh));
                         let _ = st.request_resize(rw, rh);
@@ -1154,11 +1388,13 @@ impl Mbc4Ui {
             _ => self.hover = h.map(|hh| (hh, Instant::now())),
         }
         ctx.set_cursor_icon(match h {
+            Some(Hit::Fader(i)) if !self.faders[i].vertical => egui::CursorIcon::ResizeHorizontal,
             Some(Hit::Xo(_)) => egui::CursorIcon::ResizeHorizontal,
-            Some(Hit::Thresh(_) | Hit::Plot) => egui::CursorIcon::ResizeVertical,
+            Some(Hit::Fader(_) | Hit::Thresh(_) | Hit::Plot) => egui::CursorIcon::ResizeVertical,
             Some(Hit::Resize) => egui::CursorIcon::ResizeNwSe,
-            Some(Hit::Mode(_)) => egui::CursorIcon::PointingHand,
-            _ => egui::CursorIcon::Default,
+            Some(Hit::Toggle(..) | Hit::Match(_) | Hit::Icon(_) | Hit::Zoom(_) | Hit::Io) => egui::CursorIcon::PointingHand,
+            Some(Hit::BandLo(_) | Hit::BandHi(_)) => egui::CursorIcon::Text,
+            None => egui::CursorIcon::Default,
         });
 
         if dbl && let Some(h) = h {
@@ -1171,15 +1407,10 @@ impl Mbc4Ui {
                         let align = if f.vertical { egui::Align::Center } else { egui::Align::Max };
                         self.edit = Some(Edit { rect: f.value_rect(), text: number_text(v), target: EditTarget::Fader(i), owner: None, align, fresh: true });
                     } else {
-                        self.set_once(st, f.id, self.default_of(f.id));
+                        self.reset_one(st, h, p);
                     }
                 }
-                Hit::Xo(i) => self.set_once(st, XO_IDS[i].into(), self.default_of(XO_IDS[i].into())),
-                Hit::Thresh(b) => self.set_once(st, bid(b, THR), self.default_of(bid(b, THR))),
-                Hit::Plot => {
-                    let b = self.band_at(st, p.x);
-                    self.set_once(st, bid(b, THR), self.default_of(bid(b, THR)));
-                }
+                Hit::Xo(_) | Hit::Thresh(_) | Hit::Plot => self.reset_one(st, h, p),
                 Hit::BandLo(b) => self.open_xo_edit(st, b, b - 1, self.lo_text_rect(pen, st, b)),
                 Hit::BandHi(b) => self.open_xo_edit(st, b, b, self.hi_text_rect(pen, st, b)),
                 _ => {}
@@ -1189,6 +1420,14 @@ impl Mbc4Ui {
 
         if pressed && let Some(h) = h {
             self.hover = None;
+            if alt {
+                if matches!(h, Hit::Zoom(_)) {
+                    self.request_scale(st, 1.0);
+                } else {
+                    self.reset_one(st, h, p);
+                }
+                return;
+            }
             match h {
                 Hit::Fader(i) => {
                     let f = self.faders[i];
@@ -1215,10 +1454,18 @@ impl Mbc4Ui {
                     self.set_once(st, id, v);
                 }
                 Hit::Match(b) => self.toggle_learn(st, b),
-                Hit::Mode(i) => self.params.analyzer.store(i as u32),
+                Hit::Icon(0) => self.reset_all(st),
+                Hit::Icon(_) => {
+                    let dark = !DARK.load(Relaxed);
+                    DARK.store(dark, Relaxed);
+                    save_theme(dark);
+                    self.theme_mtime = settings_mtime();
+                }
+                Hit::Zoom(i) => self.request_scale(st, ZOOMS[i].0),
+                Hit::Io => self.toggle_io(st, s),
                 Hit::Resize => {
                     self.last_req = None;
-                    self.drag = Some(Drag { hit: h, id: u32::MAX, anchor: p, anchor_norm: 0.0, fine: false, raw: 0.0, last_y: p.y, start: pos, w0: W * s });
+                    self.drag = Some(Drag { hit: h, id: u32::MAX, anchor: p, anchor_norm: 0.0, fine: false, raw: 0.0, last_y: p.y, start: pos, w0: self.w() * s });
                 }
                 Hit::BandLo(_) | Hit::BandHi(_) => {}
             }
@@ -1227,12 +1474,13 @@ impl Mbc4Ui {
 
         if let Some(Hit::Fader(i)) = h {
             for d in wheel {
+                self.last_wheel = Some(Instant::now());
                 self.wheel(st, i, if d > 0.0 { 1 } else { -1 }, fine);
             }
         }
     }
 
-    fn wheel(&self, st: &Ctx, i: usize, dir: i32, fine: bool) {
+    fn wheel(&mut self, st: &Ctx, i: usize, dir: i32, fine: bool) {
         let f = self.faders[i];
         let value = self.plain(st, f.id);
         let v = if !f.steps.list.is_empty() && !fine {
@@ -1293,7 +1541,7 @@ impl Mbc4Ui {
         self.edit = Some(Edit { rect, text: hz_short(self.xo(st, index)), target: EditTarget::Xo(index), owner: Some(band), align: egui::Align::Min, fresh: true });
     }
 
-    fn apply_edit(&self, st: &Ctx, e: &Edit) {
+    fn apply_edit(&mut self, st: &Ctx, e: &Edit) {
         match e.target {
             EditTarget::Fader(i) => {
                 let f = self.faders[i];
@@ -1322,7 +1570,7 @@ impl Mbc4Ui {
         if sh.is_learning(b) { sh.stop_learning(b) } else { sh.start_learning(b) }
     }
 
-    fn update_learn(&self, st: &Ctx, b: usize) {
+    fn update_learn(&mut self, st: &Ctx, b: usize) {
         let sh = &self.params.shared;
         if sh.is_learning(b) && sh.learned_seconds(b) >= LEARN_SECONDS {
             // done: store the compensation once; it does not move afterwards
@@ -1336,24 +1584,17 @@ impl Mbc4Ui {
 
     fn tick(&mut self, st: &Ctx) {
         let sh = self.params.shared.clone();
-        self.an.update(&sh, Mode::from(self.params.analyzer.load()));
+        self.an.update(&sh);
         for b in 0..NUM_BANDS {
             let gr = sh.gr_db(b);
             let d = &mut self.gr_disp[b];
-            *d = if gr < *d { gr } else { *d + (gr - *d) * 0.25 };
+            *d = if gr < *d { *d + (gr - *d) * 0.5 } else { *d + (gr - *d) * 0.12 };
 
             let byp = self.bypassed(st, b);
             let m = &mut self.gr_meters[b];
             let g = if byp { 0.0 } else { (-gr).min(GR_METER_RANGE) }; // positive dB
-            m.shown = if g > m.shown { g } else { m.shown + (g - m.shown) * 0.25 };
-            // held value: the peak of each half second, so it can be read
-            m.window_peak = m.window_peak.max(g);
-            m.frames += 1;
-            if m.frames >= READOUT_HOLD_FRAMES {
-                m.readout = m.window_peak;
-                m.window_peak = 0.0;
-                m.frames = 0;
-            }
+            // the compressor's own attack / release already smooth it: show every tick as it is
+            m.shown = g;
             self.update_learn(st, b);
         }
         self.in_meter.update(sh.in_peak_db());
@@ -1364,33 +1605,74 @@ impl Mbc4Ui {
 
     fn draw(&mut self, pen: &Pen<'_>, st: &Ctx) {
         // blocks are separated by rules only
-        pen.rule_h(FRAME_L, FRAME_R, FRAME_T);
-        pen.rule_h(FRAME_L, FRAME_R, FRAME_B);
+        let open = self.io_open();
+        let fr = frame_r(open);
+        pen.rule_h(FRAME_L, fr, FRAME_T);
+        pen.rule_h(FRAME_L, fr, FRAME_B);
         pen.rule_v(FRAME_L, FRAME_T, FRAME_B);
-        pen.rule_v(FRAME_R, FRAME_T, FRAME_B);
-        pen.rule_v(COL_L, FRAME_T, FRAME_B);
+        pen.rule_v(fr, FRAME_T, FRAME_B);
         pen.rule_v(COL_R, FRAME_T, FRAME_B);
-        pen.rule_h(FRAME_L, COL_L, LOGO_B);
+        pen.rule_h(FRAME_L, fr, LOGO_B);
         pen.rule_h(COL_L, COL_R, ROW_B);
         for i in 1..NUM_BANDS {
             pen.rule_v(strip_x(i), ROW_B, FRAME_B);
         }
 
-        logo(pen, 30.0, 25.5);
-        pen.section_header("01", "INPUT", 30.0, 65.0, hex(Pal::INK));
-        pen.section_header("07", "OUTPUT", COL_R + 10.0, 35.0, hex(Pal::INK));
-        self.draw_meter(pen, 80.0, self.in_meter);
-        self.draw_meter(pen, 1160.0, self.out_meter);
-        pen.text(concat!("V", env!("CARGO_PKG_VERSION")), FRAME_L, 771.0, NOTE, hex(Pal::INK3), Align2::LEFT_CENTER);
+        // the logo takes the main block's heading place
+        logo(pen, COL_L + 10.0, 25.5);
+        self.draw_io_button(pen);
+        if open {
+            // INPUT | OUTPUT above, one block for LOOK and MIX below (level with the band strips)
+            pen.rule_v(OUT_COL, LOGO_B, ROW_B);
+            pen.rule_h(COL_R, fr, ROW_B);
+            pen.section_header("INPUT", COL_R + 10.0, 65.0, hex(pal().ink));
+            pen.section_header("OUTPUT", OUT_COL + 10.0, 65.0, hex(pal().ink));
+            self.draw_meter(pen, IN_METER_X, self.in_meter);
+            self.draw_meter(pen, OUT_METER_X, self.out_meter);
+        }
+        self.draw_footer(pen);
 
         self.draw_graph(pen, st);
         for b in 0..NUM_BANDS {
             self.draw_strip(pen, st, b);
         }
         for i in 0..self.faders.len() {
+            if self.faders[i].band.is_none() && !open {
+                continue;
+            }
             self.draw_fader(pen, st, i);
         }
         self.draw_bubbles(pen, st);
+    }
+
+    /// I/O: a letter button at the right end of the top row; orange while the panel is open
+    fn draw_io_button(&self, pen: &Pen<'_>) {
+        let r = IO_RECT;
+        let c = if self.io_open() {
+            pal().acc
+        } else if self.hot == Some(Hit::Io) {
+            pal().ink
+        } else {
+            pal().ink3
+        };
+        pen.text("I/O", r[0] + r[2] / 2.0, r[1] + r[3] / 2.0, LABEL, hex(c), Align2::CENTER_CENTER);
+    }
+
+    /// system bar: version on the left; reset, theme and the UI sizes on the right
+    fn draw_footer(&self, pen: &Pen<'_>) {
+        let fr = frame_r(self.io_open());
+        pen.text(concat!("V", env!("CARGO_PKG_VERSION")), FRAME_L, FOOT_Y, NOTE, hex(pal().ink3), Align2::LEFT_CENTER);
+        for i in 0..2 {
+            let r = icon_rect(pen, fr, i);
+            let c = if self.hot == Some(Hit::Icon(i)) { pal().ink } else { pal().ink3 };
+            pen.icon(i, r[0] + r[2] / 2.0, FOOT_Y, hex(c));
+        }
+        // ink only when the window is exactly that preset; after a corner drag none is
+        let uw = self.params.ui_width.load() as f32;
+        for (i, r) in zoom_rects(pen, fr).into_iter().enumerate() {
+            let on = (uw - W * ZOOMS[i].0).abs() <= 1.0 || self.hot == Some(Hit::Zoom(i));
+            pen.text(ZOOMS[i].1, r[0] + r[2] / 2.0, FOOT_Y, NOTE, hex(if on { pal().ink } else { pal().ink3 }), Align2::CENTER_CENTER);
+        }
     }
 
     /// two columns of dots on the graph's rows (same lattice); above 0 dB in orange
@@ -1400,91 +1682,73 @@ impl Mbc4Ui {
         let (n, r0) = (rows_for(m.shown, rows), rows_for(0.0, rows));
         for j in 0..rows {
             let c = if j >= n {
-                hex(Pal::OFF)
+                hex(pal().off)
             } else if j >= r0 {
-                hex(Pal::ACC)
+                hex(pal().acc)
             } else {
-                hex(Pal::RAMP[ramp_index(j, rows)])
+                hex(pal().kept)
             };
             pen.cell(&l, 0, rows - 1 - j, c);
             pen.cell(&l, 1, rows - 1 - j, c);
         }
         // 0 dB reference: exactly as wide as the dots
-        pen.line_h(l.x(0), l.x(0) + l.ext(2), db_to_y(0.0), hex(Pal::INK), 0.5);
+        pen.line_h(l.x(0), l.x(0) + l.ext(2), db_to_y(0.0), hex(pal().ink), 0.5);
         let readout = if m.hold <= MIN_DB {
             "--.-".to_owned()
         } else {
             format!("{}{:.1}", if m.hold > 0.0 { "+" } else { "" }, m.hold)
         };
-        dot_number(pen, &readout, cx, READOUT_TOP, if m.hold > 0.0 { hex(Pal::ACC) } else { hex(Pal::INK) });
+        pen.text(&readout, cx, READOUT_TOP, VAL, if m.hold > 0.0 { hex(pal().acc) } else { hex(pal().ink) }, Align2::CENTER_CENTER);
     }
 
     /// "02 SPLIT": the spectrum drawn with cells, crossovers and per-band thresholds.
-    /// Output spectrum in grey steps, the part each band's compressor removes in orange,
+    /// Output spectrum in `kept` grey, the part each band's compressor removes in orange,
     /// the input behind it in a pale grey.
     fn draw_graph(&mut self, pen: &Pen<'_>, st: &Ctx) {
-        pen.section_header("02", "SPLIT", COL_L + 10.0, 35.0, hex(Pal::INK));
-        let mode = Mode::from(self.params.analyzer.load());
-        self.draw_cells(pen, st, mode);
+        self.draw_cells(pen, st);
 
         // scale: numbers only
         let mut db = 0.0;
         while db >= MIN_DB {
-            pen.text(&format!("{db:.0}"), PLOT_R + 7.0, db_to_y(db), TICK, hex(Pal::INK2), Align2::LEFT_CENTER);
+            pen.text(&format!("{db:.0}"), PLOT_R + 7.0, db_to_y(db), TICK, hex(pal().ink2), Align2::LEFT_CENTER);
             db -= 12.0;
         }
         for (f, t) in [(50.0, "50"), (100.0, "100"), (200.0, "200"), (500.0, "500"), (1000.0, "1k"), (2000.0, "2k"), (5000.0, "5k"), (10000.0, "10k")] {
-            pen.text(t, freq_to_x(f), READOUT_TOP, TICK, hex(Pal::INK2), Align2::CENTER_CENTER);
+            pen.text(t, freq_to_x(f), READOUT_TOP, TICK, hex(pal().ink2), Align2::CENTER_CENTER);
         }
 
         let hot = self.drag.as_ref().map(|d| d.hit).or(self.hot);
         for i in 0..3 {
             let t = if hot == Some(Hit::Xo(i)) { 1.2 } else { 0.5 };
-            pen.line_v(freq_to_x(self.xo(st, i)), PLOT_T, PLOT_B, hex(Pal::INK), t);
+            pen.line_v(freq_to_x(self.xo(st, i)), PLOT_T, PLOT_B, hex(pal().ink), t);
         }
         for b in 0..NUM_BANDS {
             let (x0, x1) = (self.band_left_x(st, b), self.band_right_x(st, b));
             let byp = self.bypassed(st, b);
             let thr = self.plain(st, bid(b, THR)) as f32;
             let t = if hot == Some(Hit::Thresh(b)) { 1.2 } else { 0.5 };
-            pen.line_h(x0, x1, db_to_y(thr), if byp { hex(Pal::D_KNOB) } else { hex(Pal::INK) }, t);
-            pen.text(LETTERS[b], x0 + 3.0, PLOT_T - 10.0, LABEL, if byp { hex(Pal::D_TEXT) } else { hex(Pal::INK2) }, Align2::LEFT_CENTER);
-        }
-
-        // analyser switch: a rounded groove, the selected segment raised and framed
-        for (i, name) in MODES.iter().enumerate() {
-            // JUCE measured the string with its trailing tracking
-            self.mode_w[i] = (pen.text_w(name, LABEL) + LABEL.tracking()).round() + 16.0;
-        }
-        let sel = self.params.analyzer.load().min(3) as usize;
-        let r0 = self.mode_rect(0);
-        let total: f32 = self.mode_w.iter().sum();
-        pen.pill(r0[0], r0[1], total, r0[3], hex(Pal::OFF), None);
-        for (i, name) in MODES.iter().enumerate() {
-            let r = self.mode_rect(i);
-            if i == sel {
-                pen.pill(r[0] + 1.0, r[1] + 1.0, r[2] - 2.0, r[3] - 2.0, hex(Pal::PLOT), Some(hex(Pal::RULE)));
-            }
-            let c = if i == sel { hex(Pal::INK) } else { hex(Pal::INK2) };
-            pen.text(name, r[0] + r[2] / 2.0, r[1] + r[3] / 2.0, LABEL, c, Align2::CENTER_CENTER);
+            pen.line_h(x0, x1, db_to_y(thr), if byp { hex(pal().d_knob) } else { hex(pal().ink) }, t);
+            pen.text(LETTERS[b], x0 + 3.0, PLOT_T - 10.0, LABEL, if byp { hex(pal().d_text) } else { hex(pal().ink2) }, Align2::LEFT_CENTER);
+            self.draw_gr(pen, b, x0 + 3.0, db_to_y(thr) + GR_BELOW, byp);
         }
     }
 
-    fn draw_cells(&self, pen: &Pen<'_>, st: &Ctx, mode: Mode) {
-        let show_out = mode == Mode::Both || mode == Mode::Post;
-        let show_in = mode != Mode::Off;
+    fn draw_cells(&self, pen: &Pen<'_>, st: &Ctx) {
         // whole-pixel lattice: how many cells fit depends a little on the UI scale
         let l = pen.lat(PLOT_L, PLOT_T, PITCH, CELL);
         let (cols, rows) = (l.fit(PLOT_R - PLOT_L), l.fit(PLOT_B - PLOT_T));
-        let n_ramp = Pal::RAMP.len();
-        let (acc_i, ghost_i, off_i) = (n_ramp, n_ramp + 1, n_ramp + 2);
+        let (kept_i, acc_i, ghost_i, off_i) = (0, 1, 2, 3);
         let colour = |i: usize| match i {
-            i if i < n_ramp => hex(Pal::RAMP[i]),
-            i if i == acc_i => hex(Pal::ACC),
-            i if i == ghost_i => hex(Pal::GHOST),
-            _ => hex(Pal::OFF),
+            0 => hex(pal().kept),
+            1 => hex(pal().acc),
+            2 => hex(pal().ghost),
+            _ => hex(pal().off),
         };
         let byp: [bool; NUM_BANDS] = std::array::from_fn(|b| self.bypassed(st, b));
+        // wet share (band mix × global mix): below 100 % the removed part fades from its tip to its root
+        let global = self.plain(st, P::Mix.into()) * 0.01;
+        let wet: [f32; NUM_BANDS] = std::array::from_fn(|b| (self.plain(st, bid(b, MIX)) * 0.01 * global).clamp(0.0, 1.0) as f32);
+        let (acc, bg) = (hex(pal().acc), hex(pal().cell));
 
         // runs of one colour are filled as single rectangles, the gaps drawn over them afterwards
         for c in 0..cols {
@@ -1494,18 +1758,15 @@ impl Mbc4Ui {
             let b = self.band_at(st, cx);
             let in_db = self.an.pre.at(idx);
             let gr = if byp[b] { 0.0 } else { self.gr_disp[b] };
-            let n_in = if show_in { rows_for(in_db, rows) } else { 0 };
-            let n_out = if show_out { rows_for(self.an.post.at(idx), rows) } else { 0 };
+            let n_in = rows_for(in_db, rows);
+            let n_out = rows_for(self.an.post.at(idx), rows);
             let n_cut = rows_for(in_db + gr, rows);
             let colour_of = |j: usize| {
-                if mode == Mode::Pre {
-                    return if j < n_in { ramp_index(j, rows) } else { off_i };
-                }
                 if j < n_out {
-                    ramp_index(j, rows)
+                    kept_i
                 } else if j < n_in && j >= n_cut {
                     acc_i // removed by the compressor
-                } else if j < n_in && show_in && mode == Mode::Both {
+                } else if j < n_in {
                     ghost_i
                 } else {
                     off_i
@@ -1518,13 +1779,23 @@ impl Mbc4Ui {
                     continue;
                 }
                 // rows [run_start, j) counted from the bottom
-                pen.span(&l, c, rows - j, 1, j - run_start, colour(run_c));
+                if run_c == acc_i && wet[b] < 0.999 {
+                    // opaque at the tip (the top of the cut), the wet share at its root
+                    let (r0, r1) = (n_cut.max(n_out), n_in);
+                    for jj in run_start..j {
+                        let t = if r1 > r0 + 1 { (jj - r0) as f32 / (r1 - r0 - 1) as f32 } else { 1.0 };
+                        let a = wet[b] + (1.0 - wet[b]) * t.clamp(0.0, 1.0);
+                        pen.cell(&l, c, rows - 1 - jj, lerp_col(bg, acc, a));
+                    }
+                } else {
+                    pen.span(&l, c, rows - j, 1, j - run_start, colour(run_c));
+                }
                 run_start = j;
                 run_c = cj;
             }
         }
         // gaps between the cells of a run, in the background colour
-        let bg = hex(Pal::CELL);
+        let bg = hex(pal().cell);
         let (top, height, left, width) = (l.y(0), l.ext(rows), l.x(0), l.ext(cols));
         for r in 0..rows.saturating_sub(1) {
             pen.fill(left, l.y(r) + l.cell(), width, l.gap(), bg);
@@ -1534,71 +1805,70 @@ impl Mbc4Ui {
         }
     }
 
-    /// One band: header (number, name, range, S / M / B), the gain match button and the
-    /// gain-reduction meter (the faders are drawn with the others).
+    /// One band's header: letter, range, the GR bar, MATCH and S / M / B
+    /// (the sliders are drawn with the other faders).
     fn draw_strip(&self, pen: &Pen<'_>, st: &Ctx, b: usize) {
         let x0 = strip_x(b);
         let dim = self.bypassed(st, b);
-        let ink = if dim { hex(Pal::D_TEXT) } else { hex(Pal::INK) };
-        pen.section_header(&format!("0{}", b + 3), &format!("BAND {}", LETTERS[b]), x0 + 10.0, HEADER_Y, ink);
+        let ink = if dim { hex(pal().d_text) } else { hex(pal().ink) };
+        pen.section_header(LETTERS[b], x0 + 10.0, HEADER_Y, ink);
         if self.edit.as_ref().is_none_or(|e| e.owner != Some(b)) {
             let s = format!("{}{DASH}{} Hz", self.range_lo(st, b), self.range_hi(st, b));
-            pen.text(&s, x0 + RANGE_X, HEADER_Y, VAL, if dim { hex(Pal::D_TEXT) } else { hex(Pal::INK2) }, Align2::LEFT_CENTER);
+            pen.text(&s, x0 + RANGE_X, HEADER_Y, VAL, if dim { hex(pal().d_text) } else { hex(pal().ink2) }, Align2::LEFT_CENTER);
         }
 
-        // S / M / B: 6 px squares, orange when on, a thin frame when off
+        // S / M / B: the letter is the button: orange when on, ink on hover, ink3 when off
         for (j, name) in ["S", "M", "B"].iter().enumerate() {
             let r = toggle_rect(b, j);
-            let cy = r[1] + r[3] / 2.0;
-            if self.on(st, bid(b, SOLO + j)) {
-                pen.rect(r[0] + 2.0, cy - 3.0, 6.0, 6.0, hex(Pal::ACC));
+            let c = if self.on(st, bid(b, SOLO + j)) {
+                pal().acc
+            } else if self.hot == Some(Hit::Toggle(b, j)) {
+                pal().ink
             } else {
-                pen.outline(r[0] + 2.0, cy - 3.0, 6.0, 6.0, hex(Pal::INK3));
-            }
-            pen.text(name, r[0] + 11.0, cy, LABEL, hex(Pal::INK), Align2::LEFT_CENTER);
+                pal().ink3
+            };
+            pen.text(name, r[0] + r[2] / 2.0, r[1] + r[3] / 2.0, LABEL, hex(c), Align2::CENTER_CENTER);
         }
 
         // gain match: a small push button in a rounded groove, orange text while learning
         let r = match_rect(b);
-        pen.pill(r[0], r[1], r[2], r[3], hex(Pal::OFF), None);
+        pen.pill(r[0], r[1], r[2], r[3], hex(pal().off), None);
         let c = if dim {
-            hex(Pal::D_TEXT)
+            hex(pal().d_text)
         } else if self.params.shared.is_learning(b) {
-            hex(Pal::ACC)
+            hex(pal().acc)
         } else {
-            hex(Pal::INK)
+            hex(pal().ink)
         };
         pen.text("MATCH", r[0] + r[2] / 2.0, r[1] + r[3] / 2.0, LABEL, c, Align2::CENTER_CENTER);
 
-        // gain reduction: orange cells hanging from the top
+    }
+
+    /// A band's gain reduction under the left end of its threshold line: an orange line growing
+    /// to the right, the number riding on its tip, both on a ground of the number's height.
+    fn draw_gr(&self, pen: &Pen<'_>, b: usize, x: f32, cy: f32, dim: bool) {
         let m = self.gr_meters[b];
-        let cx = x0 + GR_X;
-        let lit = ((m.shown / GR_METER_RANGE).clamp(0.0, 1.0) * FADER_ROWS as f32).round() as usize;
-        let l = pen.lat(cx - 3.5, FADER_CELLS_Y, PITCH, CELL);
-        for j in 0..FADER_ROWS {
-            let c = if j < lit {
-                if dim { hex(Pal::D_LIT) } else { hex(Pal::ACC) }
-            } else {
-                hex(Pal::OFF)
-            };
-            pen.cell(&l, 0, j, c);
-            pen.cell(&l, 1, j, c);
-        }
-        pen.text("GR", cx, FADER_LABEL_Y, LABEL, ink, Align2::CENTER_CENTER);
-        let reducing = !dim && m.readout >= 0.05;
+        let len = (m.shown / GR_METER_RANGE).clamp(0.0, 1.0) * GR_LEN;
+        let tip = if len > 0.0 { x + len + 2.5 } else { x };
+        let reducing = !dim && m.shown >= 0.05;
         let (t, c) = if reducing {
-            (format!("-{:.1} dB", m.readout), hex(Pal::ACC))
+            (format!("-{:.1}", m.shown), hex(pal().acc))
         } else {
-            ("0.0 dB".to_owned(), if dim { hex(Pal::D_TEXT) } else { hex(Pal::INK3) })
+            ("0.0".to_owned(), if dim { hex(pal().d_text) } else { hex(pal().ink3) })
         };
-        pen.text(&t, cx, FADER_VALUE_Y, VAL, c, Align2::CENTER_CENTER);
+        // a ground exactly the number's font height, from the line's left end to the number's right edge
+        let end = tip + pen.text_w(&t, TINY);
+        pen.rect(x, cy - TINY.size() / 2.0, end - x, TINY.size(), hex(pal().cell));
+        if len > 0.0 {
+            pen.line_h(x, x + len, cy, if dim { hex(pal().d_knob) } else { hex(pal().acc) }, GR_LINE);
+        }
+        pen.text(&t, tip, cy, TINY, c, Align2::LEFT_CENTER);
     }
 
     fn draw_fader(&self, pen: &Pen<'_>, st: &Ctx, i: usize) {
         let f = self.faders[i];
         let v = self.plain(st, f.id);
         let dim = f.band.is_some_and(|b| self.bypassed(st, b));
-        let dragging = self.drag.as_ref().is_some_and(|d| d.hit == Hit::Fader(i));
         let (lo_v, hi_v) = self.bounds(f.id);
 
         let n = f.cells();
@@ -1606,13 +1876,21 @@ impl Mbc4Ui {
         let bipolar = lo_v < 0.0 && hi_v > 0.0;
         let b0 = if bipolar { (self.norm(f.id, 0.0) * (n - 1) as f64).round() as usize } else { 0 };
         let (lo, hi) = (b0.min(r), b0.max(r));
-        let cap = if dim { hex(Pal::D_KNOB) } else { hex(Pal::INK) };
-        let lit = if dim { hex(Pal::D_LIT) } else { hex(Pal::LIT) };
-        let text_c = if dim { hex(Pal::D_TEXT) } else { hex(Pal::INK) };
-        let needle = if dragging { 1.0 } else { 0.5 };
+        let cap = if dim { hex(pal().d_knob) } else { hex(pal().ink) };
+        let lit = if dim { hex(pal().d_lit) } else { hex(pal().lit) };
+        let text_c = if dim { hex(pal().d_text) } else { hex(pal().ink) };
         let editing = self.edit.as_ref().is_some_and(|e| e.target == EditTarget::Fader(i));
 
-        if f.vertical {
+        if f.on_meter {
+            // the knob is the value's row of the meter's own cells; the level stays visible around it
+            let l = pen.lat(f.x - 3.5, PLOT_T, PITCH, CELL);
+            let rows = l.fit(PLOT_B - PLOT_T);
+            let r = (self.norm(f.id, v) * (rows - 1) as f64).round() as usize;
+            pen.span(&l, 0, rows - 1 - r, 2, 1, cap);
+            if !editing {
+                pen.text(&format_value(v, f.format), f.x, METER_VALUE_Y, VAL, text_c, Align2::CENTER_CENTER);
+            }
+        } else if f.vertical {
             let l = pen.lat(f.x - 3.5, FADER_CELLS_Y, PITCH, CELL);
             for j in 0..n {
                 let c = if j == r {
@@ -1620,12 +1898,11 @@ impl Mbc4Ui {
                 } else if j >= lo && j <= hi {
                     lit
                 } else {
-                    hex(Pal::OFF)
+                    hex(pal().off)
                 };
                 pen.cell(&l, 0, n - 1 - j, c);
                 pen.cell(&l, 1, n - 1 - j, c);
             }
-            pen.line_h(f.x - 9.0, f.x + 9.0, l.y(n - 1 - r) + l.cell() * 0.5, cap, needle);
             pen.text(f.label, f.x, FADER_LABEL_Y, LABEL, text_c, Align2::CENTER_CENTER);
             if !editing {
                 pen.text(&format_value(v, f.format), f.x, FADER_VALUE_Y, VAL, text_c, Align2::CENTER_CENTER);
@@ -1639,14 +1916,13 @@ impl Mbc4Ui {
                 } else if j < r {
                     lit
                 } else {
-                    hex(Pal::OFF)
+                    hex(pal().off)
                 };
                 pen.cell(&l, j, 0, c);
             }
-            pen.line_v(l.x(r) + l.cell() * 0.5, cy - 5.0, cy + 5.0, cap, needle);
             pen.text(f.label, f.x + 4.0, cy, LABEL, text_c, Align2::LEFT_CENTER);
             if !editing {
-                pen.text(&format_value(v, f.format), f.x + 224.0, cy, VAL, text_c, Align2::RIGHT_CENTER);
+                pen.text(&format_value(v, f.format), f.x + SLIDER_W - 4.0, cy, VAL, text_c, Align2::RIGHT_CENTER);
             }
         }
     }
@@ -1683,7 +1959,7 @@ impl Mbc4Ui {
         let pad = vec2(9.0, 7.0) * s;
         let head_fmt = egui::TextFormat {
             font_id: FontId::new(8.0 * s, FontFamily::Monospace),
-            color: hex(Pal::ACC),
+            color: hex(pal().acc),
             extra_letter_spacing: 0.8 * s,
             ..Default::default()
         };
@@ -1692,7 +1968,7 @@ impl Mbc4Ui {
             body.to_owned(),
             egui::TextFormat {
                 font_id: FontId::new(10.5 * s, FontFamily::Proportional),
-                color: hex(Pal::PLOT),
+                color: hex(pal().tip_text),
                 line_height: Some(10.5 * s * 1.55),
                 ..Default::default()
             },
@@ -1711,18 +1987,19 @@ impl Mbc4Ui {
         }
         p = p.max(screen.min);
         let r = Rect::from_min_size(p, size);
-        painter.rect_filled(r, (3.0 * s) as u8, Color32::from_rgba_unmultiplied(0x11, 0x12, 0x10, 245));
+        let (bg, a) = pal().tip_bg;
+        painter.rect_filled(r, (3.0 * s) as u8, Color32::from_rgba_unmultiplied((bg >> 16) as u8, (bg >> 8) as u8, bg as u8, a));
         let y = p.y + pad.y;
-        painter.galley(pos2(p.x + pad.x, y), g_head.clone(), hex(Pal::ACC));
-        painter.galley(pos2(p.x + pad.x, y + g_head.size().y + 4.0 * s), g_body, hex(Pal::PLOT));
+        painter.galley(pos2(p.x + pad.x, y), g_head.clone(), hex(pal().acc));
+        painter.galley(pos2(p.x + pad.x, y + g_head.size().y + 4.0 * s), g_body, hex(pal().tip_text));
     }
 
-    /// Value entry: Enter confirms, Esc or clicking elsewhere cancels.
+    /// Value entry: Enter or clicking elsewhere confirms, Esc cancels.
     fn draw_edit(&mut self, ui: &mut egui::Ui, st: &Ctx, origin: Pos2, s: f32) {
         let Some(mut e) = self.edit.take() else { return };
         let r = Rect::from_min_size(pos2(origin.x + e.rect[0] * s, origin.y + e.rect[1] * s), vec2(e.rect[2] * s, e.rect[3] * s));
-        ui.painter().rect_filled(r, 0.0, hex(Pal::PLOT));
-        ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0_f32, hex(Pal::RULE)), StrokeKind::Inside);
+        ui.painter().rect_filled(r, 0.0, hex(pal().plot));
+        ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0_f32, hex(pal().rule)), StrokeKind::Inside);
         let id = egui::Id::new("mbc4-edit");
         let family = if self.light { FontFamily::Name("light".into()) } else { FontFamily::Monospace };
         let resp = ui.put(
@@ -1733,7 +2010,7 @@ impl Mbc4Ui {
                 .horizontal_align(e.align)
                 .char_limit(10)
                 .font(FontId::new(VAL.size() * s, family))
-                .text_color(hex(Pal::INK)),
+                .text_color(hex(pal().ink)),
         );
         if e.fresh {
             resp.request_focus();
@@ -1747,9 +2024,12 @@ impl Mbc4Ui {
             return;
         }
         let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
-        if enter {
+        if esc {
+            return;
+        }
+        if enter || resp.lost_focus() {
             self.apply_edit(st, &e);
-        } else if !(esc || resp.lost_focus()) {
+        } else {
             self.edit = Some(e);
         }
     }
@@ -1790,6 +2070,7 @@ impl Mbc4Ui {
 impl EditorUi<Mbc4Params> for Mbc4Ui {
     fn opened(&mut self, _st: &Ctx) {
         self.asked_size = false;
+        self.theme_check = None;
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, st: &Ctx) {
@@ -1809,19 +2090,30 @@ impl EditorUi<Mbc4Params> for Mbc4Ui {
             self.fonts_ready = true;
         }
         ctx.request_repaint();
+        // the theme is one setting for the whole family: pick up changes made in other plugins
+        if self.theme_check.is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0) {
+            self.theme_check = Some(Instant::now());
+            let m = settings_mtime();
+            if m != self.theme_mtime {
+                self.theme_mtime = m;
+                load_theme();
+            }
+        }
         let full = ui.max_rect();
-        let s = (full.width() / W).min(full.height() / H);
+        let s = (full.width() / self.w()).min(full.height() / H);
         let origin = full.min;
-        // remember the size, but only sizes the user can pick (100 – 180 %)
-        let w = full.width().round() as u32;
+        // remember the scale (as the folded width), but only scales the user can pick (75 – 125 %),
+        // and not while the host is still catching up with a panel toggle
+        let w = (W * s).round() as u32;
         let (lo, hi) = SCALE_RANGE;
-        if w as f32 >= W * lo - 1.0 && w as f32 <= W * hi + 1.0 && self.params.ui_width.load() != w {
+        let settled = (full.width() / full.height() - self.w() / H).abs() < 0.01;
+        if settled && s >= lo - 0.001 && s <= hi + 0.001 && self.params.ui_width.load() != w {
             self.params.ui_width.store(w);
         }
 
         // own the whole surface so egui widgets underneath never see the clicks
         let _ = ui.allocate_rect(full, egui::Sense::click_and_drag());
-        ui.painter().rect_filled(full, 0.0, hex(Pal::CELL));
+        ui.painter().rect_filled(full, 0.0, hex(pal().cell));
 
         // display ticks at 30 Hz, whatever the frame rate
         let now = Instant::now();
@@ -1843,17 +2135,17 @@ impl EditorUi<Mbc4Params> for Mbc4Ui {
         if self.edit.is_none() {
             self.input(&ctx, &pen, st);
         }
+        self.commit(st);
         self.draw(&pen, st);
-        // the resize corner: a staircase of cells
-        let over = self.hot == Some(Hit::Resize) || self.drag.as_ref().is_some_and(|d| d.hit == Hit::Resize);
+        // the resize corner: a staircase of cells in the window's corner
         for r in 0..3 {
             for c in (2 - r)..3 {
-                pen.rect(W - 13.0 + 4.0 * c as f32, H - 13.0 + 4.0 * r as f32, 3.0, 3.0, if over { hex(Pal::INK2) } else { hex(Pal::INK3) });
+                pen.rect(self.w() - 13.0 + 4.0 * c as f32, H - 13.0 + 4.0 * r as f32, 3.0, 3.0, hex(pal().ink3));
             }
         }
-        ui.visuals_mut().selection.bg_fill = Color32::from_rgba_unmultiplied(0xFF, 0x4D, 0x0F, 64);
-        ui.visuals_mut().selection.stroke = Stroke::new(1.0_f32, hex(Pal::INK));
-        ui.visuals_mut().text_cursor.stroke = Stroke::new(1.0_f32, hex(Pal::INK));
+        ui.visuals_mut().selection.bg_fill = hex(pal().acc);
+        ui.visuals_mut().selection.stroke = Stroke::new(1.0_f32, hex(pal().plot));
+        ui.visuals_mut().text_cursor.stroke = Stroke::new(1.0_f32, hex(pal().ink));
         self.draw_edit(ui, st, origin, s);
         self.draw_tooltip(&ctx, origin, s, full);
     }
@@ -1866,12 +2158,13 @@ fn visuals() -> egui::Visuals {
     v
 }
 
-/// The size MBC4 wants: the saved width (within 100 – 180 %), or 150 % the first time.
+/// The size MBC4 wants: the saved scale (within 75 – 125 %, 100 % the first time) of the
+/// current layout, folded or with the INPUT / OUTPUT panel.
 fn wanted_size(params: &Mbc4Params) -> (u32, u32) {
     let stored = params.ui_width.load();
     let (lo, hi) = SCALE_RANGE;
-    let w = if stored == 0 { (W * DEFAULT_SCALE) as u32 } else { stored.clamp((W * lo) as u32, (W * hi) as u32) };
-    (w, (w as f32 * H / W).round() as u32)
+    let s = if stored == 0 { DEFAULT_SCALE } else { (stored as f32 / W).clamp(lo, hi) };
+    ((width_of(params.io_open.load() != 0) * s).round() as u32, (H * s).round() as u32)
 }
 
 pub fn editor(params: Arc<Mbc4Params>) -> Box<dyn Editor> {
@@ -1883,9 +2176,10 @@ pub fn editor(params: Arc<Mbc4Params>) -> Box<dyn Editor> {
         .with_font(CHIVO)
         .with_visuals(visuals())
         .resizable(true)
-        .aspect_ratio(Some((31, 20)))
+        // no aspect lock: the panel changes the ratio; the UI scales to fit whatever the host gives
+        .aspect_ratio(None)
         .min_size(((W * lo) as u32, (H * lo) as u32))
-        .max_size(((W * hi) as u32, (H * hi) as u32))
+        .max_size((((W + IO_W) * hi) as u32, (H * hi) as u32))
         .into_editor()
 }
 
@@ -1917,31 +2211,46 @@ mod tests {
 
     #[test]
     fn paints_every_section() {
-        let (_, st, mut ui, ctx) = setup();
+        let (params, st, mut ui, ctx) = setup();
+        // folded by default: no INPUT / OUTPUT panel
         let mut out = None;
         for _ in 0..3 {
             out = Some(frame(&ctx, &mut ui, &st, vec![]));
         }
         let t = texts(&out.unwrap());
-        for s in ["INPUT", "SPLIT", "OUTPUT", "BAND A", "BAND D", "THS", "RAT", "MATCH", "GR", "LOOK", "IN+OUT", "0.0 dB", "2:1", "60 dB"] {
+        for s in ["I/O", "A", "D", "GAIN", "RAT", "MATCH", "0.0", "0 dB", "2:1", "25 ms"] {
             assert!(t.iter().any(|x| x == s), "{s} missing: {t:?}");
         }
         assert!(t.iter().any(|x| x == "120\u{2013}1.00k Hz"), "band B range missing: {t:?}");
+        assert!(!t.iter().any(|x| x == "INPUT" || x == "LOOK"), "panel drawn while folded: {t:?}");
+
+        params.io_open.store(1);
+        let mut out = None;
+        for _ in 0..3 {
+            let mut ri = RawInput::default();
+            ri.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, vec2(width_of(true) * 1.5, H * 1.5)));
+            out = Some(ctx.run_ui(ri, |u| ui.ui(u, &st)));
+        }
+        let t = texts(&out.unwrap());
+        for s in ["INPUT", "OUTPUT", "LOOK", "MIX"] {
+            assert!(t.iter().any(|x| x == s), "{s} missing with the panel open: {t:?}");
+        }
     }
 
     #[test]
     fn tooltip_paints_heading_and_japanese_body() {
         let (_, st, mut ui, ctx) = setup();
         // hover band A's THS fader body
-        let p = pos2((strip_x(0) + THS_X) * 1.5, 500.0 * 1.5);
+        // hover band A's RAT slider
+        let p = pos2((strip_x(0) + 100.0) * 1.5, SLIDER_Y0 * 1.5);
         for _ in 0..3 {
             frame(&ctx, &mut ui, &st, vec![Event::PointerMoved(p)]);
         }
         std::thread::sleep(std::time::Duration::from_millis(600));
         let out = frame(&ctx, &mut ui, &st, vec![Event::PointerMoved(p)]);
         let t = texts(&out);
-        assert!(t.iter().any(|s| s == "THRESHOLD"), "tooltip heading missing: {t:?}");
-        let body = t.iter().find(|s| s.contains("圧縮します")).expect("tooltip body missing");
+        assert!(t.iter().any(|s| s == "RATIO"), "tooltip heading missing: {t:?}");
+        let body = t.iter().find(|s| s.contains("圧縮の比率")).expect("tooltip body missing");
         let missing = ctx.fonts_mut(|f| !f.has_glyphs(&FontId::new(15.75, FontFamily::Proportional), body));
         assert!(!missing, "Japanese glyphs are not in any loaded font");
     }
