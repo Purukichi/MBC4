@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MBC4 in a DAW</title>
+<!--
+  A generic, made-up DAW screen around the mockup, to judge how MBC4 sits on a real desktop.
+  The screen is 1536 × 864 CSS px: a 1920 × 1080 display at Windows' 125 % scaling.
+  The plugin window is the mockup itself (MBC4_PC1.html in an iframe); it asks for its size
+  the way the plugin asks the host, so the I/O panel and the 75 / 100 / 125 buttons resize it.
+-->
+<style>
+  :root { --bg: #1e1f22; --panel: #26272b; --line: #34353a; --text: #a9abb1; --dim: #6c6e75; --hi: #d8dadf; }
+  html, body { margin: 0; height: 100%; background: #0c0c0d; overflow: hidden; font: 12px "Segoe UI", system-ui, sans-serif; color: var(--text); }
+  #fit { position: absolute; left: 50%; top: 50%; transform-origin: 0 0; }
+  #screen { position: relative; width: 1536px; height: 864px; background: var(--bg); overflow: hidden; }
+  .menu { height: 26px; display: flex; gap: 18px; align-items: center; padding: 0 12px; background: #18191b; border-bottom: 1px solid var(--line); }
+  .transport { height: 44px; display: flex; gap: 10px; align-items: center; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .btn { width: 26px; height: 22px; border-radius: 3px; background: #33343a; display: grid; place-items: center; color: var(--hi); }
+  .time { margin-left: 14px; padding: 4px 10px; background: #111214; border-radius: 3px; color: #c9e3c4; font: 15px Consolas, monospace; letter-spacing: 1px; }
+  .main { position: absolute; top: 71px; bottom: 30px; left: 0; right: 0; display: flex; }
+  .heads { width: 220px; background: var(--panel); border-right: 1px solid var(--line); }
+  .ruler { height: 22px; border-bottom: 1px solid var(--line); background: #222326; }
+  .head { height: 64px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; padding: 0 10px; }
+  .chip { width: 6px; height: 40px; border-radius: 2px; }
+  .head b { color: var(--hi); font-weight: 600; }
+  .head .fx { margin-left: auto; font-size: 10px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 3px; color: var(--dim); }
+  .head .fx.on { color: var(--hi); border-color: #5a5c63; }
+  .lanes { flex: 1; position: relative; background-image: repeating-linear-gradient(90deg, transparent 0 79px, #26272b 79px 80px); }
+  .lane { height: 64px; border-bottom: 1px solid #2a2b2f; position: relative; }
+  .clip { position: absolute; top: 4px; bottom: 4px; border-radius: 3px; overflow: hidden; }
+  .clip canvas { width: 100%; height: 100%; display: block; }
+  .status { position: absolute; bottom: 0; left: 0; right: 0; height: 30px; background: #18191b; border-top: 1px solid var(--line); display: flex; align-items: center; padding: 0 12px; color: var(--dim); }
+  /* the floating plugin window: a plain host title bar around the editor */
+  .win { position: absolute; box-shadow: 0 12px 40px rgba(0, 0, 0, .55); border: 1px solid #45464c; background: #2b2c30; }
+  .bar { height: 26px; display: flex; align-items: center; gap: 10px; padding: 0 8px; color: var(--hi); cursor: move; user-select: none; }
+  .bar .x { margin-left: auto; color: var(--dim); }
+  .bar .sel { padding: 1px 6px; border: 1px solid #45464c; border-radius: 3px; color: var(--text); font-size: 11px; }
+  iframe { display: block; border: 0; }
+  .note { position: absolute; right: 12px; bottom: 6px; color: var(--dim); }
+</style>
+<div id="fit"><div id="screen">
+  <div class="menu"><span>File</span><span>Edit</span><span>View</span><span>Track</span><span>Insert</span><span>Mix</span><span>Window</span><span>Help</span></div>
+  <div class="transport">
+    <div class="btn">◀◀</div><div class="btn">▶</div><div class="btn">■</div><div class="btn" style="color:#e05a4e">●</div>
+    <div class="time">00:01:23.456</div><span style="margin-left:14px">120.00 BPM</span><span>4/4</span>
+  </div>
+  <div class="main">
+    <div class="heads"><div class="ruler"></div></div>
+    <div class="lanes"><div class="ruler"></div></div>
+  </div>
+  <div class="status">48 kHz · 24 bit · buffer 256 <span class="note">Virtual DAW preview — 1920 × 1080 at 125 % (1536 × 864)</span></div>
+  <div class="win" id="win">
+    <div class="bar" id="bar"><span>Bass</span><span class="sel">Insert 2 · MBC4</span><span style="color:var(--dim)">Bypass · Preset ▾</span><span class="x">✕</span></div>
+    <iframe id="ed" src="MBC4_PC1.html" width="1350" height="650"></iframe>
+  </div>
+</div></div>
+<script>
+'use strict';
+// tracks with made-up clips
+const TRACKS = [['Kick', '#7a8a9c'], ['Snare', '#8c7f9e'], ['Bass', '#6e9a86'], ['Guitar', '#a08a6a'], ['Keys', '#8a9a6e'], ['Vocal', '#a07a7a'], ['FX', '#6a8aa0'], ['Bus', '#808080']];
+const heads = document.querySelector('.heads'), lanes = document.querySelector('.lanes');
+TRACKS.forEach(([name, col], i) => {
+  const h = document.createElement('div'); h.className = 'head';
+  h.innerHTML = `<div class="chip" style="background:${col}"></div><b>${name}</b><span style="color:var(--dim)">M S</span>` +
+    `<span class="fx${name === 'Bass' ? ' on' : ''}">${name === 'Bass' ? 'MBC4' : 'FX'}</span>`;
+  heads.appendChild(h);
+  const lane = document.createElement('div'); lane.className = 'lane'; lanes.appendChild(lane);
+  for (let c = 0; c < 4; ++c) {
+    const x = 40 + c * 320 + (i * 37) % 60, w = 200 + ((i + c) * 53) % 90;
+    const clip = document.createElement('div'); clip.className = 'clip';
+    clip.style.cssText = `left:${x}px;width:${w}px;background:${col}33;border:1px solid ${col}88`;
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = 56; clip.appendChild(cv); lane.appendChild(clip);
+    const g = cv.getContext('2d'); g.fillStyle = col;
+    for (let px = 0; px < w; ++px) { const a = (Math.sin(px * 0.21 + i) * 0.5 + 0.5) * (0.3 + 0.7 * Math.abs(Math.sin(px * 0.031 + c))) * 22; g.fillRect(px, 28 - a, 1, a * 2); }
+  }
+});
+
+// the plugin window follows the size the editor asks for
+const win = document.getElementById('win'), ed = document.getElementById('ed');
+let pos = null;
+function place(w, h) {
+  ed.width = w; ed.height = h;
+  if (!pos) pos = [Math.round((1536 - w) / 2), Math.round(110)];
+  // a host keeps the left edge and grows to the right; here the window is nudged back on screen
+  pos[0] = Math.max(0, Math.min(pos[0], 1536 - w - 2));
+  win.style.left = pos[0] + 'px'; win.style.top = pos[1] + 'px';
+}
+addEventListener('message', e => { const s = e.data && e.data.mbc4Size; if (s) place(s[0], s[1]); });
+place(1350, 650);
+
+// drag the window by its title bar
+document.getElementById('bar').addEventListener('pointerdown', e => {
+  const sx = e.clientX, sy = e.clientY, p0 = pos.slice(), sc = scale();
+  const mv = ev => { pos = [p0[0] + (ev.clientX - sx) / sc, p0[1] + (ev.clientY - sy) / sc]; place(ed.width, ed.height); };
+  const up = () => { removeEventListener('pointermove', mv); removeEventListener('pointerup', up); };
+  addEventListener('pointermove', mv); addEventListener('pointerup', up);
+});
+
+// the whole screen scaled to fit the browser window
+const fitEl = document.getElementById('fit');
+// never enlarged (that would blur the editor); shrunk only when the browser window is smaller
+const scale = () => Math.min(1, innerWidth / 1536, innerHeight / 864);
+function fitScreen() { const s = scale(); fitEl.style.transform = `translate(${-768 * s}px, ${-432 * s}px) scale(${s})`; }
+addEventListener('resize', fitScreen); fitScreen();
+</script>

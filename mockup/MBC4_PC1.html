@@ -62,7 +62,7 @@ const SL_X = 46, SL_CELLS = 36, SL_W = 100 + 4 * SL_CELLS;                 // ho
 
 // ───────────────────────────────── canvas
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-const BASE = 1.25;                                         // "100 %" draws the design units 1.25 times
+const BASE = 1;                                            // "100 %" draws the design units as they are
 let s = 1, k = 1, zoom = BASE;                             // zoom: the UI size (75 – 125 % of BASE)
 function fit() {
   const dpr = window.devicePixelRatio || 1;
@@ -70,6 +70,8 @@ function fit() {
   k = s * dpr;
   cv.width = Math.round(W * k); cv.height = Math.round(H * k);
   cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px';
+  // inside a host page (daw_sim.html): ask for the window size this layout wants, like the plugin asks the DAW
+  if (window.parent !== window) window.parent.postMessage({ mbc4Size: [Math.round(W * zoom), Math.round(H * zoom)] }, '*');
 }
 
 // pixel-snapped rect in base units (identity transform)
@@ -91,8 +93,6 @@ function Lat(x, y, pitch = 4, cell = 3) {
   return L;
 }
 // rules: 0.2 px
-function ruleH(x1, x2, y) { ctx.fillStyle = C.rule; ctx.fillRect(x1 * k, (y - 0.1) * k, (x2 - x1) * k, 0.2 * k); }
-function ruleV(x, y1, y2) { ctx.fillStyle = C.rule; ctx.fillRect((x - 0.1) * k, y1 * k, 0.2 * k, (y2 - y1) * k); }
 // reference lines: never under one device pixel
 const dev = t => Math.max(1, Math.round(t * k));
 function lineH(x1, x2, y, c, t = 0.5) { const d = dev(t); ctx.fillStyle = c; ctx.fillRect(Math.round(x1 * k), Math.round(y * k - d / 2), Math.round((x2 - x1) * k), d); }
@@ -103,7 +103,9 @@ function T(str, x, y, o, c = C.ink, al = 'left') {
   ctx.setTransform(k, 0, 0, k, 0, 0);
   ctx.font = font(o); ctx.letterSpacing = o.ls + 'px';
   ctx.fillStyle = c; ctx.textAlign = al; ctx.textBaseline = 'middle';
-  ctx.fillText(str, al === 'center' ? x + o.ls / 2 : x, y);
+  // on whole device pixels, so the small sizes stay sharp
+  const px = v => Math.round(v * k) / k;
+  ctx.fillText(str, px(al === 'center' ? x + o.ls / 2 : x), px(y));
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 function tw(str, o) { ctx.font = font(o); ctx.letterSpacing = o.ls + 'px'; return ctx.measureText(str).width; }
@@ -481,11 +483,7 @@ function draw() {
   ctx.fillStyle = C.cell; ctx.fillRect(0, 0, cv.width, cv.height);
 
   // rules only
-  ruleH(20, FRAME_R, 20); ruleH(20, FRAME_R, FRAME_B); ruleV(20, 20, FRAME_B); ruleV(FRAME_R, 20, FRAME_B);
-  ruleV(COL_R, 20, FRAME_B);
-  ruleH(20, FRAME_R, 50); ruleH(COL_L, COL_R, ROW_B);   // top row: logo, analyser switch, I/O
-  if (ioOpen) { ruleV(OUT_COL, 50, ROW_B); ruleH(COL_R, FRAME_R, ROW_B); }   // INPUT | OUTPUT, then one LOOK / MIX block
-  for (let i = 1; i < 4; ++i) ruleV(COL_L + STRIP_W * i, ROW_B, FRAME_B);
+  // no dividers: the blocks are set apart by the grid alone
 
   drawLogo();
   if (ioOpen) { header('INPUT', COL_R + 10, 65); header('OUTPUT', OUT_COL + 10, 65); }

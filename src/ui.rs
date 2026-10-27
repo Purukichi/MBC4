@@ -30,8 +30,8 @@ type Ctx = PluginContext<Mbc4Params>;
 const W: f32 = COL_R + 20.0;
 const IO_W: f32 = 130.0;
 const H: f32 = FRAME_B + 40.0;
-/// "100 %": the design units drawn 1.25 times (the presets and the corner drag are relative to it)
-const DEFAULT_SCALE: f32 = 1.25;
+/// "100 %": the design units as they are (the presets and the corner drag are relative to it)
+const DEFAULT_SCALE: f32 = 1.0;
 /// 75 – 125 % (the corner drag and the size MBC4 asks the host for)
 const SCALE_RANGE: (f32, f32) = (0.75 * DEFAULT_SCALE, 1.25 * DEFAULT_SCALE);
 /// footer presets, the last one ending at the frame's right edge
@@ -220,8 +220,6 @@ const FOOT_Y: f32 = FRAME_B + 11.0;
 /// input | main | output, both side columns 95 px (the 75 px logo with 10 on each side)
 const COL_L: f32 = FRAME_L;
 const COL_R: f32 = COL_L + STRIP_W * NUM_BANDS as f32;
-/// top row (logo, SPLIT, analyser switch) bottom, across the whole frame
-const LOGO_B: f32 = 50.0;
 /// graph | band strips
 const ROW_B: f32 = 320.0;
 const STRIP_W: f32 = 260.0;
@@ -616,13 +614,6 @@ impl Pen<'_> {
         let x1 = ((x + w) * self.k).round().max(x0 + 1.0);
         let y1 = ((y + h) * self.k).round().max(y0 + 1.0);
         self.p.rect_filled(Rect::from_min_max(self.px(x0, y0), self.px(x1, y1)), 0.0, col);
-    }
-    /// 0.2 px rules
-    fn rule_h(&self, x1: f32, x2: f32, y: f32) {
-        self.fill(x1, y - 0.1, x2 - x1, 0.2, hex(pal().rule));
-    }
-    fn rule_v(&self, x: f32, y1: f32, y2: f32) {
-        self.fill(x - 0.1, y1, 0.2, y2 - y1, hex(pal().rule));
     }
     fn dev(&self, t: f32) -> f32 {
         (t * self.k).round().max(1.0)
@@ -1605,27 +1596,14 @@ impl Mbc4Ui {
     // ── drawing
 
     fn draw(&mut self, pen: &Pen<'_>, st: &Ctx) {
-        // blocks are separated by rules only
+        // no dividers: the blocks are set apart by the grid alone
         let open = self.io_open();
-        let fr = frame_r(open);
-        pen.rule_h(FRAME_L, fr, FRAME_T);
-        pen.rule_h(FRAME_L, fr, FRAME_B);
-        pen.rule_v(FRAME_L, FRAME_T, FRAME_B);
-        pen.rule_v(fr, FRAME_T, FRAME_B);
-        pen.rule_v(COL_R, FRAME_T, FRAME_B);
-        pen.rule_h(FRAME_L, fr, LOGO_B);
-        pen.rule_h(COL_L, COL_R, ROW_B);
-        for i in 1..NUM_BANDS {
-            pen.rule_v(strip_x(i), ROW_B, FRAME_B);
-        }
 
         // the logo takes the main block's heading place
         logo(pen, COL_L + 10.0, 25.5);
         self.draw_io_button(pen);
         if open {
-            // INPUT | OUTPUT above, one block for LOOK and MIX below (level with the band strips)
-            pen.rule_v(OUT_COL, LOGO_B, ROW_B);
-            pen.rule_h(COL_R, fr, ROW_B);
+            // INPUT | OUTPUT above, LOOK and MIX below (level with the band strips)
             pen.section_header("INPUT", COL_R + 10.0, 65.0, hex(pal().ink));
             pen.section_header("OUTPUT", OUT_COL + 10.0, 65.0, hex(pal().ink));
             self.draw_meter(pen, IN_METER_X, self.in_meter);
@@ -2100,6 +2078,11 @@ impl EditorUi<Mbc4Params> for Mbc4Ui {
                 load_theme();
             }
         }
+        // follow the theme with the glyph coverage (re-rasterises the font atlas only on a change)
+        let want = text_alpha();
+        if ctx.global_style().visuals.text_options.alpha_from_coverage != want {
+            ctx.all_styles_mut(|s| s.visuals.text_options.alpha_from_coverage = want);
+        }
         let full = ui.max_rect();
         let s = (full.width() / self.w()).min(full.height() / H);
         let origin = full.min;
@@ -2152,10 +2135,15 @@ impl EditorUi<Mbc4Params> for Mbc4Ui {
     }
 }
 
-/// Light-mode visuals with linear glyph coverage (JUCE renders coverage linearly).
+/// Glyph coverage → alpha for the theme: a little heavier than linear so the small Light
+/// sizes stay crisp (dark ink on light), egui's sharp curve for light ink on dark.
+fn text_alpha() -> egui::epaint::AlphaFromCoverage {
+    if DARK.load(Relaxed) { egui::epaint::AlphaFromCoverage::TwoCoverageMinusCoverageSq } else { egui::epaint::AlphaFromCoverage::Gamma(0.7) }
+}
+
 fn visuals() -> egui::Visuals {
     let mut v = egui::Visuals::light();
-    v.text_options.alpha_from_coverage = egui::epaint::AlphaFromCoverage::Linear;
+    v.text_options.alpha_from_coverage = text_alpha();
     v
 }
 
