@@ -31,7 +31,7 @@ killall -9 AudioComponentRegistrar
 - ゲインマッチ（match）: 3 秒間（無音を除く）の実効 GR を平均し、補正量を gain に一度だけ書き込む（以後は固定）
 - 全体: input / output（±36 dB）/ mix、lookahead 0〜10 ms（遅延はホストに通知、DAW のバイパス時も時間整列）
 - スペクトラム（常に in と out を重ねて表示、1/6 オクターブ平滑化。mix が 100 % 未満のとき、削られた量のオレンジは先端から根元へ薄くなる）、バンドごとの GR（スレッショルド線の下、60 Hz で更新）、IN/OUT メーター
-- UI は 75〜125 % で拡大縮小（フッターの 75 / 100 / 125、または右下の角をドラッグ。初期 100 %、サイズは保存）。テーマ（ライト / ダーク）は PC1 系プラグイン共通の設定（`%APPDATA%\PC1-style\settings.cfg`）。フォントは Chivo Mono（SIL OFL 1.1、`resources/fonts/OFL.txt`）
+- UI は 75〜125 % で拡大縮小（フッターの 75 / 100 / 125、または右下の角をドラッグ。初期 100 %、サイズは保存）。テーマ（ライト / ダーク）は PC1 系プラグイン共通の設定（`%APPDATA%\PC1-style\settings.cfg`）。フォントは Inter Display 4.1（Regular / Light / ロゴは Bold、SIL OFL 1.1、`resources/fonts/Inter-OFL.txt`）
 - CPU: ステレオ 48 kHz で 1 コアの約 1 %
 
 ## 操作

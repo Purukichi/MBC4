@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inter Weights</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
+<!--
+  Every weight of Inter (rsms, SIL OFL 1.1): the logo at its real size and ×4, and the UI's type
+  roles at their real sizes. MBC4 bundles Regular, Light and Bold (resources/fonts).
+-->
+<style>
+  :root { --cell: #EDEEEA; --ink: #0D0E0C; --ink2: #454642; --ink3: #7C7D78; --acc: #FF4D0F; }
+  :root[data-theme="dark"] { --cell: #171816; --ink: #E9EAE6; --ink2: #B3B4AF; --ink3: #83847F; }
+  html, body { margin: 0; background: var(--cell); color: var(--ink2); font: 400 12px Inter, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 14px; font-weight: 600; color: var(--ink); margin: 0 0 4px; }
+  h2 { font-size: 10px; font-weight: 500; color: var(--ink3); letter-spacing: .8px; text-transform: uppercase; margin: 30px 0 8px; }
+  p { color: var(--ink3); margin: 0 0 8px; line-height: 1.6; font-family: Inter, "Yu Gothic UI", sans-serif; }
+  .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; }
+  button { font: inherit; color: var(--ink3); background: none; border: 0; padding: 2px 6px; cursor: pointer; }
+  button:hover { color: var(--ink); }
+  button.on { color: var(--acc); }
+  .wrap { overflow-x: auto; }
+  table { border-collapse: collapse; }
+  td, th { padding: 6px 18px 6px 0; text-align: left; vertical-align: middle; font-weight: 400; white-space: nowrap; }
+  th { color: var(--ink3); font-size: 10px; letter-spacing: .6px; font-weight: 500; }
+  .num { color: var(--ink3); font-variant-numeric: tabular-nums; }
+  .nm { color: var(--ink); }
+  .bundled { color: var(--acc); font-size: 10px; }
+  .logo { color: var(--ink); line-height: 1; }
+  .logo b { color: var(--acc); font-weight: inherit; }
+  .roles span { display: inline-block; margin-right: 14px; color: var(--ink); }
+</style>
+<main>
+  <h1>Inter — weights</h1>
+  <p>Inter 4.1（rsms・SIL OFL 1.1）の全ウェイト。ロゴは大文字 12 px（実寸）と ×4、UI の文字は各ロールの実寸。オレンジの印は MBC4 に同梱した 3 つ。</p>
+  <div class="bar">
+    <span>THEME</span><button data-theme="light">LIGHT</button><button data-theme="dark">DARK</button>
+    <span style="width:14px"></span>
+    <span>STYLE</span><button data-it="0">UPRIGHT</button><button data-it="1">ITALIC</button>
+    <span style="width:14px"></span>
+    <span>OPTICAL</span><button data-op="text">TEXT</button><button data-op="display">DISPLAY</button>
+  </div>
+  <h2>Weights</h2>
+  <div class="wrap"><table id="t"></table></div>
+</main>
+<script>
+'use strict';
+const W = [[100, 'Thin'], [200, 'ExtraLight'], [300, 'Light'], [400, 'Regular'], [500, 'Medium'], [600, 'SemiBold'], [700, 'Bold'], [800, 'ExtraBold'], [900, 'Black']];
+const BUNDLED = { 300: 'values, notes', 400: 'labels', 700: 'logo' };
+// Inter's capitals are 0.727 em: a 12 px capital is 16.5 px type
+const CAP = 0.727;
+const S = { theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light', it: 0, op: 'display' };
+try { Object.assign(S, JSON.parse(localStorage.getItem('interw') || '{}')); } catch {}
+function render() {
+  document.documentElement.dataset.theme = S.theme;
+  for (const k of Object.keys(S)) document.querySelectorAll(`button[data-${k}]`).forEach(b => b.classList.toggle('on', b.getAttribute('data-' + k) == S[k]));
+  const st = w => `font-weight:${w};font-style:${S.it ? 'italic' : 'normal'};font-optical-sizing:none;font-variation-settings:'opsz' ${S.op === 'display' ? 32 : 14}`;
+  const logo = (w, cap) => `<div class="logo" style="${st(w)};font-size:${cap / CAP}px">MBC<b>4</b></div>`;
+  let h = '<tr><th>WEIGHT</th><th></th><th>LOGO 12 PX</th><th>LOGO ×4</th><th>UI ROLES (LABEL 8 · VALUE 9 · NOTE 7.5 · TINY 6)</th><th>ALPHABET</th></tr>';
+  for (const [w, n] of W) {
+    h += `<tr><td class="num">${w}</td><td class="nm">${n}${BUNDLED[w] ? `<br><span class="bundled">● ${BUNDLED[w]}</span>` : ''}</td>` +
+      `<td>${logo(w, 12)}</td><td>${logo(w, 48)}</td>` +
+      `<td class="roles"><span style="${st(w)};font-size:8px;letter-spacing:.8px">THRESHOLD</span><span style="${st(w)};font-size:9px">-18.0 dB</span>` +
+      `<span style="${st(w)};font-size:7.5px;letter-spacing:.6px">v1.2.0</span><span style="${st(w)};font-size:6px">-3.2</span></td>` +
+      `<td style="${st(w)};font-size:14px;color:var(--ink)">ABCDEFGHIJKLM 0123456789</td></tr>`;
+  }
+  document.getElementById('t').innerHTML = h;
+}
+document.querySelectorAll('button').forEach(b => b.onclick = () => {
+  const k = Object.keys(b.dataset)[0], v = b.dataset[k]; S[k] = k === 'it' ? +v : v;
+  try { localStorage.setItem('interw', JSON.stringify(S)); } catch {}
+  render();
+});
+render();
+</script>

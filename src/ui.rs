@@ -168,9 +168,12 @@ fn settings_mtime() -> Option<SystemTime> {
     settings_path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
-/// Chivo Mono Regular / Light (SIL OFL 1.1, `resources/fonts/OFL.txt`)
-const CHIVO: &[u8] = include_bytes!("../resources/fonts/ChivoMono-Regular.ttf");
-const CHIVO_LIGHT: &[u8] = include_bytes!("../resources/fonts/ChivoMono-Light.ttf");
+/// Inter Display 4.1 Regular / Light / Bold: the large optical size (rsms, SIL OFL 1.1, `resources/fonts/Inter-OFL.txt`)
+const INTER: &[u8] = include_bytes!("../resources/fonts/InterDisplay-Regular.ttf");
+const INTER_LIGHT: &[u8] = include_bytes!("../resources/fonts/InterDisplay-Light.ttf");
+const INTER_BOLD: &[u8] = include_bytes!("../resources/fonts/InterDisplay-Bold.ttf");
+/// Inter's capital height per em
+const INTER_CAP: f32 = 0.727;
 
 /// The four type roles. Sizes are em heights in design units.
 #[derive(Clone, Copy, PartialEq)]
@@ -730,25 +733,23 @@ fn icon_rect(pen: &Pen<'_>, fr: f32, i: usize) -> [f32; 4] {
     [if i == 1 { theme_x } else { theme_x - IW }, FOOT_Y - 7.0, IW, 14.0]
 }
 
-/// 4 × 5 dot logo, the last letter in the accent
+/// The logo in Inter Bold, capitals as tall as the old 5-cell logo, the last letter in the accent.
+/// (x, y) is the top-left of the capitals.
 fn logo(pen: &Pen<'_>, x: f32, y: f32) {
-    const LETTERS: [[&str; 5]; 4] = [
-        ["10001", "11011", "10101", "10001", "10001"], // M
-        ["11110", "10001", "11110", "10001", "11110"], // B
-        ["01111", "10000", "10000", "10000", "01111"], // C
-        ["10010", "10010", "11111", "00010", "00010"], // 4
-    ];
-    let l = pen.lat(x, y, PITCH, CELL);
-    for (n, g) in LETTERS.iter().enumerate() {
-        let c = if n == 3 { hex(pal().acc) } else { hex(pal().ink) };
-        for (r, row) in g.iter().enumerate() {
-            for (cc, b) in row.chars().enumerate() {
-                if b == '1' {
-                    pen.cell(&l, n * 6 + cc, r, c);
-                }
-            }
-        }
-    }
+    let cap = 5.0 * PITCH - (PITCH - CELL);
+    // the Bold family arrives one frame after the fonts are set
+    let bold = FontFamily::Name("logo".into());
+    let family = if pen.p.ctx().fonts(|f| f.families().contains(&bold)) { bold } else { FontFamily::Proportional };
+    let font = FontId::new(cap / INTER_CAP * pen.s, family);
+    let fmt = |c| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    let mut job = egui::text::LayoutJob::default();
+    job.append("MBC", 0.0, fmt(hex(pal().ink)));
+    job.append("4", 0.0, fmt(hex(pal().acc)));
+    let g = pen.p.layout_job(job);
+    // Inter's line box is centred on its capitals: centre the galley on the capitals' middle
+    let r = Align2::LEFT_CENTER.anchor_size(pen.at(x, y + cap / 2.0), g.size());
+    let snap = |v: f32| (v * pen.ppp).round() / pen.ppp;
+    pen.p.galley(pos2(snap(r.min.x), snap(r.min.y)), g, hex(pal().ink));
 }
 
 // ───────────────────────────────── spectrum analyser
@@ -2016,9 +2017,10 @@ impl Mbc4Ui {
     /// Returns whether a Japanese face was found.
     fn setup_fonts(ctx: &egui::Context) -> bool {
         let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert("chivo".into(), Arc::new(egui::FontData::from_static(CHIVO)));
-        fonts.font_data.insert("chivo-light".into(), Arc::new(egui::FontData::from_static(CHIVO_LIGHT)));
-        let mut chain = vec!["chivo".to_owned()];
+        fonts.font_data.insert("inter".into(), Arc::new(egui::FontData::from_static(INTER)));
+        fonts.font_data.insert("inter-light".into(), Arc::new(egui::FontData::from_static(INTER_LIGHT)));
+        fonts.font_data.insert("inter-bold".into(), Arc::new(egui::FontData::from_static(INTER_BOLD)));
+        let mut chain = vec!["inter".to_owned()];
         // Japanese tooltip text: the OS gothic face, loaded at run time
         for path in [
             r"C:\Windows\Fonts\YuGothM.ttc",
@@ -2038,9 +2040,10 @@ impl Mbc4Ui {
                 list.insert(n, name.clone());
             }
         }
-        let mut light = vec!["chivo-light".to_owned()];
+        let mut light = vec!["inter-light".to_owned()];
         light.extend(chain.iter().skip(1).cloned());
         fonts.families.insert(FontFamily::Name("light".into()), light);
+        fonts.families.insert(FontFamily::Name("logo".into()), vec!["inter-bold".to_owned(), "inter".to_owned()]);
         ctx.set_fonts(fonts);
         chain.len() > 1
     }
@@ -2063,8 +2066,9 @@ impl EditorUi<Mbc4Params> for Mbc4Ui {
                 let _ = st.request_resize(w, h);
             }
         }
-        // A fresh host context only carries Chivo Mono: re-add the Japanese fallback.
-        if !self.fonts_ready || (self.jp_font && !ctx.fonts_mut(|f| f.has_glyphs(&FontId::new(10.0, FontFamily::Proportional), "圧縮"))) {
+        // A fresh host context only carries Inter Regular: re-add Light, Bold and the Japanese fallback.
+        let has_logo = ctx.fonts(|f| f.families().contains(&FontFamily::Name("logo".into())));
+        if !self.fonts_ready || !has_logo || (self.jp_font && !ctx.fonts_mut(|f| f.has_glyphs(&FontId::new(10.0, FontFamily::Proportional), "圧縮"))) {
             self.jp_font = Self::setup_fonts(&ctx);
             self.fonts_ready = true;
         }
@@ -2161,8 +2165,8 @@ pub fn editor(params: Arc<Mbc4Params>) -> Box<dyn Editor> {
     let (_, hi) = SCALE_RANGE;
     let lo = MIN_FIT_SCALE;
     EguiEditor::with_ui(params.clone(), (w, h), Mbc4Ui::new(params))
-        // Chivo Mono from the first frame; the Japanese fallback joins on frame one
-        .with_font(CHIVO)
+        // Inter from the first frame; Light, Bold and the Japanese fallback join on frame one
+        .with_font(INTER)
         .with_visuals(visuals())
         .resizable(true)
         // no aspect lock: the panel changes the ratio; the UI scales to fit whatever the host gives

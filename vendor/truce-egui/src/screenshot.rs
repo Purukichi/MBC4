@@ -56,6 +56,11 @@ pub(crate) fn render_with_state<P: Params + ?Sized>(
         .or_default()
         .native_pixels_per_point = Some(pixels_per_point);
 
+    // A warm-up frame first: fonts an editor sets during a frame only take effect on the next
+    // one, as in a live window after its first paint.
+    let _ = ctx.run_ui(raw_input.clone(), |ui| {
+        ui_fn(ui, state);
+    });
     let output = ctx.run_ui(raw_input, |ui| {
         ui_fn(ui, state);
     });

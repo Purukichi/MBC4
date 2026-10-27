@@ -1,0 +1,209 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logo Font Candidates</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chivo+Mono:wght@300;400&display=swap" rel="stylesheet">
+<!--
+  Grotesque sans fonts in the spirit of Area (Blaze Type): orthogonal terminals, tight counters,
+  ink traps in the heavy weights, a 10° italic. Each one is set as the logo would be, at the logo's
+  place and height (top row, right edge, capitals 12 px, the last letter orange).
+  Area itself is an Adobe Fonts face; it shows up only if this browser can see it as a local font.
+  The earlier pixel-font page is logo_font_pixel.html.
+-->
+<style>
+  :root { --cell: #EDEEEA; --ink: #0D0E0C; --ink2: #454642; --ink3: #7C7D78; --off: #DADBD6; --acc: #FF4D0F; --plot: #F9F9F6; }
+  :root[data-theme="dark"] { --cell: #171816; --ink: #E9EAE6; --ink2: #B3B4AF; --ink3: #83847F; --off: #262724; --plot: #30312E; }
+  html, body { margin: 0; background: var(--cell); color: var(--ink2); font: 400 12px "Chivo Mono", monospace; }
+  main { max-width: 1240px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 14px; font-weight: 400; color: var(--ink); letter-spacing: .8px; margin: 0 0 4px; }
+  h2 { font-size: 10px; font-weight: 400; color: var(--ink3); letter-spacing: .8px; text-transform: uppercase; margin: 30px 0 8px; }
+  p.note { color: var(--ink3); margin: 0 0 10px; line-height: 1.6; font-family: "Yu Gothic UI", "Yu Gothic", sans-serif; }
+  .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 12px 0 0; }
+  button, input { font: inherit; color: var(--ink3); background: none; border: 0; padding: 2px 6px; cursor: pointer; }
+  button:hover { color: var(--ink); }
+  button.on { color: var(--acc); }
+  input { color: var(--ink); background: var(--plot); cursor: text; width: 90px; }
+  .sep { width: 14px; }
+  .wrap { overflow-x: auto; }
+  table { border-collapse: collapse; }
+  td, th { padding: 4px 10px 4px 0; text-align: left; vertical-align: middle; font-weight: 400; white-space: nowrap; }
+  th { color: var(--ink3); font-size: 10px; letter-spacing: .6px; }
+  td.name { color: var(--ink); }
+  td.dim { color: var(--ink3); font-size: 10px; }
+  td.star button { padding: 0 4px; }
+  canvas { display: block; }
+</style>
+<main>
+  <h1>LOGO FONT CANDIDATES</h1>
+  <p class="note">Area（Blaze Type）に近い、直線的な端・締まったカウンター・太いウェイトのインクトラップを持つグロテスク体を、ロゴの位置と高さ（上段の右端・大文字 12 px・最後の 1 文字をオレンジ）に置いて比べます。☆ で候補に残すと上にまとまります（このブラウザにだけ保存）。</p>
+  <div class="bar">
+    <span>THEME</span><button data-theme="light">LIGHT</button><button data-theme="dark">DARK</button>
+    <span class="sep"></span>
+    <span>UI</span><button data-z="0.75">75%</button><button data-z="1">100%</button><button data-z="1.25">125%</button>
+    <span class="sep"></span>
+    <span>VIEW</span><button data-view="1">REAL</button><button data-view="4">×4</button>
+    <span class="sep"></span>
+    <span id="dpr"></span>
+  </div>
+  <div class="bar">
+    <span>WEIGHT</span><button data-w="200">200</button><button data-w="300">300</button><button data-w="400">400</button><button data-w="500">500</button><button data-w="600">600</button><button data-w="700">700</button><button data-w="800">800</button><button data-w="900">900</button>
+    <span class="sep"></span>
+    <span>STYLE</span><button data-it="0">UPRIGHT</button><button data-it="1">ITALIC</button>
+    <span class="sep"></span>
+    <span>TRACK</span><button data-tr="-0.04">-4%</button><button data-tr="0">0</button><button data-tr="0.04">+4%</button><button data-tr="0.1">+10%</button>
+  </div>
+  <div class="bar"><span>NAMES</span><input value="PC1"><input value="APD1"><input value="MSP1"><input value="MBC4"><input value="PMP1"></div>
+
+  <h2>Shortlist</h2>
+  <div class="wrap"><table id="short"></table></div>
+  <h2>All candidates</h2>
+  <div class="wrap"><table id="all"></table></div>
+  <h2>Not loaded</h2>
+  <p class="note" id="failed">—</p>
+</main>
+<script>
+'use strict';
+// ───────────────────────────────── candidates: [family, weight range, has italic, note]
+// Google Fonts (SIL Open Font License) unless noted; Area is tried as a local font
+const FONTS = [
+  ['Area', null, true, 'Adobe Fonts · local only'],
+  ['Inter Tight', [100, 900], true, 'neo-grotesque, tight'],
+  ['Inter', [100, 900], true, 'neo-grotesque'],
+  ['Geist', [100, 900], false, 'Vercel, orthogonal'],
+  ['Schibsted Grotesk', [400, 900], true, 'flat terminals'],
+  ['Instrument Sans', [400, 700], true, 'compact grotesque'],
+  ['Host Grotesk', [300, 800], true, 'grotesque'],
+  ['Familjen Grotesk', [400, 700], true, 'grotesque, ink traps'],
+  ['Bricolage Grotesque', [200, 800], false, 'ink traps, quirky'],
+  ['Hanken Grotesk', [100, 900], true, 'geometric grotesque'],
+  ['Mona Sans', [200, 900], true, 'GitHub, wide range'],
+  ['Archivo', [100, 900], true, 'grotesque, many widths'],
+  ['Funnel Display', [300, 800], false, 'display grotesque'],
+  ['Space Grotesk', [300, 700], false, 'geometric, quirky'],
+  ['Manrope', [200, 800], false, 'geometric grotesque'],
+  ['Onest', [100, 900], false, 'neo-grotesque'],
+  ['Figtree', [300, 900], true, 'geometric'],
+  ['Albert Sans', [100, 900], true, 'geometric grotesque'],
+  ['Rethink Sans', [400, 800], true, 'grotesque'],
+  ['Radio Canada Big', [400, 700], true, 'grotesque'],
+  ['Golos Text', [400, 900], false, 'neo-grotesque'],
+  ['Public Sans', [100, 900], true, 'neutral grotesque'],
+];
+// one stylesheet per family; when the full axis request fails, retry with the bare family
+const sheet = href => new Promise(done => {
+  const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = href;
+  l.onload = () => done(true); l.onerror = () => { l.remove(); done(false); }; document.head.appendChild(l);
+});
+const sheets = Object.fromEntries(FONTS.map(([fam, wr, it]) => {
+  if (!wr) return [fam, Promise.resolve()];
+  const base = `https://fonts.googleapis.com/css2?family=${fam.replace(/ /g, '+')}`, r = `${wr[0]}..${wr[1]}`;
+  const full = base + (it ? `:ital,wght@0,${r};1,${r}` : `:wght@${r}`) + '&display=swap';
+  return [fam, sheet(full).then(ok => ok || sheet(base + `:wght@${r}&display=swap`)).then(ok => ok || sheet(base + '&display=swap'))];
+}));
+// Area through local(): Creative Cloud usually hides its fonts from browsers, so this may well fail
+const AREA_NAMES = ['Area', 'Area Normal', 'Area Variable', 'Area Normal Regular', 'AreaNormal-Regular', 'Area Extended', 'Area Inktrap'];
+
+const store = { get(k, d) { try { const v = localStorage.getItem('logogrot.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+                set(k, v) { try { localStorage.setItem('logogrot.' + k, JSON.stringify(v)); } catch {} } };
+const S = {
+  theme: store.get('theme', matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
+  z: store.get('z', 1), view: store.get('view', 1), w: store.get('w', 700), it: store.get('it', 0), tr: store.get('tr', 0),
+};
+let stars = store.get('stars', ['Inter Tight', 'Schibsted Grotesk', 'Familjen Grotesk']);
+const info = {};                          // family → { ok, capR, face }
+const css = n => getComputedStyle(document.documentElement).getPropertyValue('--' + n).trim();
+const names = () => [...document.querySelectorAll('.bar input')].map(i => i.value).filter(Boolean);
+
+function capRatio(face) {
+  const g = document.createElement('canvas').getContext('2d');
+  g.font = `${S.it ? 'italic ' : ''}${S.w} 200px "${face}"`;
+  return (g.measureText('H').actualBoundingBoxAscent || 140) / 200;
+}
+
+// one logo in a top-row strip: right edge 20 px in, capitals 12 px centred on +15
+function drawLogo(cv, face, str) {
+  const dpr = devicePixelRatio || 1, k = S.z * dpr * S.view, W = 140, H = 30;
+  cv.width = Math.round(W * k); cv.height = Math.round(H * k);
+  cv.style.width = cv.width / dpr + 'px'; cv.style.height = cv.height / dpr + 'px';
+  const g = cv.getContext('2d');
+  g.fillStyle = css('cell'); g.fillRect(0, 0, cv.width, cv.height);
+  const capDev = Math.round(12 * k), size = capDev / capRatio(face), ls = S.tr * size;
+  g.font = `${S.it ? 'italic ' : ''}${S.w} ${size}px "${face}"`; g.textBaseline = 'alphabetic'; g.letterSpacing = ls + 'px';
+  const head = str.slice(0, -1), tail = str.slice(-1);
+  const mt = g.measureText(tail), wh = g.measureText(head).width;
+  const right = Math.round((W - 20) * k), base = Math.round(15 * k + capDev / 2);
+  // the last letter's ink, not its advance, meets the right edge
+  const x0 = Math.round(right - mt.actualBoundingBoxRight - wh);
+  g.fillStyle = css('ink'); g.fillText(head, x0, base);
+  g.fillStyle = css('acc'); g.fillText(tail, x0 + wh, base);
+}
+
+function row(fam, note) {
+  const tr = document.createElement('tr'), on = stars.includes(fam);
+  tr.innerHTML = `<td class="star"><button class="${on ? 'on' : ''}">${on ? '★' : '☆'}</button></td><td class="name">${fam}</td>`;
+  tr.querySelector('button').onclick = () => { stars = on ? stars.filter(s => s !== fam) : [...stars, fam]; store.set('stars', stars); render(); };
+  for (const n of names()) { const td = document.createElement('td'), cv = document.createElement('canvas'); drawLogo(cv, info[fam].face, n); td.appendChild(cv); tr.appendChild(td); }
+  const [, wr, it] = FONTS.find(f => f[0] === fam);
+  const d = document.createElement('td'); d.className = 'dim';
+  const outW = wr && (S.w < wr[0] || S.w > wr[1]), fakeIt = S.it && wr && !it;
+  d.innerHTML = `${note}<br>${wr ? `wght ${wr[0]}–${wr[1]}` : ''}${outW ? ' · weight out of range' : ''}${fakeIt ? ' · slanted, no real italic' : ''}`;
+  tr.appendChild(d);
+  return tr;
+}
+const head = () => `<tr><th></th><th>FONT</th>${names().map(n => `<th>${n.toUpperCase()}</th>`).join('')}<th></th></tr>`;
+
+function render() {
+  document.documentElement.dataset.theme = S.theme;
+  for (const key of Object.keys(S))
+    document.querySelectorAll(`button[data-${key}]`).forEach(b => b.classList.toggle('on', b.getAttribute('data-' + key) == S[key]));
+  document.getElementById('dpr').textContent = `SCREEN ×${(devicePixelRatio || 1).toFixed(2)}`;
+  const ok = FONTS.filter(([f]) => info[f] && info[f].ok);
+  for (const [id, list] of [['short', ok.filter(([f]) => stars.includes(f))], ['all', ok]]) {
+    const t = document.getElementById(id); t.innerHTML = head();
+    list.forEach(([f, , , note]) => t.appendChild(row(f, note)));
+  }
+  const bad = FONTS.filter(([f]) => info[f] && !info[f].ok).map(([f, , , note]) => `${f}（${note}）`);
+  document.getElementById('failed').textContent = bad.length ? bad.join(' · ') : '—';
+}
+
+async function loadArea() {
+  for (const n of AREA_NAMES) {
+    try {
+      const f = new FontFace('Area local', `local("${n}")`);
+      await f.load(); document.fonts.add(f);
+      return { ok: true, face: 'Area local' };
+    } catch {}
+  }
+  return { ok: false };
+}
+async function loadAll() {
+  await Promise.all(FONTS.map(async ([fam, wr]) => {
+    if (!wr) { info[fam] = await loadArea(); return; }
+    await sheets[fam];
+    // a fresh stylesheet's faces can take a moment to register: ask a few times
+    let ok = false;
+    for (let t = 0; t < 5 && !ok; ++t) {
+      try { ok = (await document.fonts.load(`700 20px "${fam}"`, 'PCAMDBS014')).length > 0; } catch {}
+      if (!ok) await new Promise(r => setTimeout(r, 300));
+    }
+    info[fam] = { ok, face: fam };
+  }));
+  refresh();
+}
+
+// canvas text does not wait for a weight or style that is not loaded yet: load it, then draw
+async function refresh() {
+  const style = `${S.it ? 'italic ' : ''}${S.w} 20px`;
+  await Promise.all(Object.values(info).filter(i => i.ok).map(i => document.fonts.load(`${style} "${i.face}"`, 'PCAMDBS014').catch(() => {})));
+  render();
+}
+for (const key of Object.keys(S))
+  document.querySelectorAll(`button[data-${key}]`).forEach(b => b.onclick = () => {
+    const v = b.getAttribute('data-' + key); S[key] = key === 'theme' ? v : +v; store.set(key, S[key]); refresh();
+  });
+document.querySelectorAll('.bar input').forEach(i => i.oninput = render);
+document.documentElement.dataset.theme = S.theme;
+document.fonts.ready.then(loadAll);
+</script>

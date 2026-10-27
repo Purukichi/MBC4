@@ -1,18 +1,19 @@
+<meta charset="utf-8">
 <title>MBC4 PC1 Mockup</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Chivo+Mono:wght@300;400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@32,300;32,400;32,700&display=swap" rel="stylesheet">
 <style>
   html, body { margin: 0; height: 100%; background: var(--cell); overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; }
   canvas { display: block; touch-action: none; }
   #tip { position: fixed; pointer-events: none; display: none; z-index: 3;
          background: var(--tipBg); color: var(--tipText); border-radius: 3px; box-sizing: border-box; }
-  #tip .h { font-family: "Chivo Mono", monospace; font-weight: 400; color: #FF4D0F; text-transform: uppercase; }
+  #tip .h { font-family: Inter, sans-serif; font-weight: 400; color: #FF4D0F; text-transform: uppercase; }
   #tip .b { font-family: "Yu Gothic UI", "Yu Gothic", "Hiragino Sans", sans-serif; line-height: 1.55; }
   #edit { position: fixed; display: none; z-index: 4; box-sizing: border-box; margin: 0; padding: 0 2px;
           border: 1px solid var(--rule); border-radius: 0; outline: none; background: var(--plot); color: var(--ink);
-          font-family: "Chivo Mono", monospace; font-weight: 300; text-align: center; }
+          font-family: Inter, sans-serif; font-weight: 300; text-align: center; }
 </style>
 <canvas id="c"></canvas>
 <div id="tip"><div class="h"></div><div class="b"></div></div>
@@ -98,7 +99,7 @@ const dev = t => Math.max(1, Math.round(t * k));
 function lineH(x1, x2, y, c, t = 0.5) { const d = dev(t); ctx.fillStyle = c; ctx.fillRect(Math.round(x1 * k), Math.round(y * k - d / 2), Math.round((x2 - x1) * k), d); }
 function lineV(x, y1, y2, c, t = 0.5) { const d = dev(t); ctx.fillStyle = c; ctx.fillRect(Math.round(x * k - d / 2), Math.round(y1 * k), d, Math.round((y2 - y1) * k)); }
 
-function font(o) { return `${o.w} ${o.size}px "Chivo Mono", monospace`; }
+function font(o) { return `${o.w} ${o.size}px Inter, sans-serif`; }
 function T(str, x, y, o, c = C.ink, al = 'left') {
   ctx.setTransform(k, 0, 0, k, 0, 0);
   ctx.font = font(o); ctx.letterSpacing = o.ls + 'px';
@@ -124,14 +125,6 @@ function bubble(str, x, y) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   T(str, bx + w / 2, by + h / 2, VAL, C.onInk, 'center');
 }
-
-// ───────────────────────────────── dot glyphs
-const LOGO = {
-  M: ['10001','11011','10101','10001','10001'],   // 5 x 5 cells
-  B: ['11110','10001','11110','10001','11110'],
-  C: ['01111','10000','10000','10000','01111'],
-  '4': ['10010','10010','11111','00010','00010'],
-};
 
 // ───────────────────────────────── parameters
 const lin = (a, b) => ({ n: v => (v - a) / (b - a), v: n => a + n * (b - a) });
@@ -471,11 +464,14 @@ function drawGr(b, x, cy) {
 }
 
 function drawLogo() {
-  const L = Lat(COL_L + 10, 25.5), on = new Path2D(), acc = new Path2D();   // the logo takes the heading place
-  ['M', 'B', 'C', '4'].forEach((ch, n) =>
-    LOGO[ch].forEach((row, r) => [...row].forEach((bit, c) => { if (bit === '1') L.add(n === 3 ? acc : on, n * 6 + c, r); })));
-  ctx.fillStyle = C.ink; ctx.fill(on);
-  ctx.fillStyle = C.acc; ctx.fill(acc);
+  // Inter Bold, capitals as tall as the old 5-cell logo (19), the last letter in the accent
+  const cap = 19, x = COL_L + 10, base = 25.5 + cap;          // the logo takes the heading place
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.font = `700 ${cap / 0.727}px Inter, sans-serif`; ctx.letterSpacing = '0px'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  const w = ctx.measureText('MBC').width, by = Math.round(base * k) / k;
+  ctx.fillStyle = C.ink; ctx.fillText('MBC', Math.round(x * k) / k, by);
+  ctx.fillStyle = C.acc; ctx.fillText('4', Math.round(x * k) / k + w, by);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
 function draw() {
@@ -696,6 +692,6 @@ function loop(t) {
   draw();
 }
 addEventListener('resize', fit);
-Promise.all([document.fonts.load('300 9px "Chivo Mono"'), document.fonts.load('400 8px "Chivo Mono"')])
+Promise.all([document.fonts.load('300 9px Inter'), document.fonts.load('400 8px Inter'), document.fonts.load('700 26px Inter')])
   .catch(() => {}).finally(() => { fit(); buildFooter(); requestAnimationFrame(loop); });
 </script>
